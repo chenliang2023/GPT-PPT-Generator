@@ -1,0 +1,4 @@
+interface:
+  display_name: "Images to Editable PPTX"
+  short_description: "Rebuild slide images as native editable PowerPoint objects"
+  default_prompt: "Rebuild these slide images into a genuinely editable PPTX using native text, shapes, lines, tables, and charts. Do not embed full-page slide screenshots."

@@ -1,0 +1,393 @@
+from __future__ import annotations
+
+import base64
+import zipfile
+
+import app
+import pytest
+
+
+class FakeSession:
+    def get(self, *_args, **_kwargs):
+        raise AssertionError("URL download should not be used for Base64 responses")
+
+
+class FakeDownloadResponse:
+    content = b"downloaded-image"
+
+    def raise_for_status(self):
+        return None
+
+
+class FakeDownloadSession:
+    def get(self, *_args, **_kwargs):
+        return FakeDownloadResponse()
+
+
+class DeniedResponse:
+    ok = False
+    status_code = 403
+    text = '{"error":{"message":"Image generation is not enabled for this group"}}'
+
+
+class DeniedSession:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return None
+
+    def post(self, *_args, **_kwargs):
+        return DeniedResponse()
+
+
+class TransientResponse:
+    def __init__(self, status_code, text="", payload=None):
+        self.status_code = status_code
+        self.text = text
+        self._payload = payload or {}
+        self.ok = 200 <= status_code < 300
+
+    def json(self):
+        return self._payload
+
+
+class TransientThenSuccessSession:
+    calls = 0
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return None
+
+    def post(self, *_args, **_kwargs):
+        type(self).calls += 1
+        if type(self).calls < 3:
+            return TransientResponse(502, "upstream error")
+        return TransientResponse(
+            200,
+            payload={"data": [{"b64_json": base64.b64encode(b"ok").decode("ascii")}]},
+        )
+
+    def get(self, *_args, **_kwargs):
+        raise AssertionError("URL download should not be used for Base64 responses")
+
+
+class AlwaysUpstreamFailureSession:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return None
+
+    def post(self, *_args, **_kwargs):
+        return TransientResponse(
+            502,
+            '{"error":{"message":"upstream image connection failed, please retry later"}}',
+        )
+
+
+class ChatSuccessSession:
+    endpoints = []
+    payloads = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return None
+
+    def post(self, endpoint, *_args, **kwargs):
+        type(self).endpoints.append(endpoint)
+        type(self).payloads.append(kwargs["json"])
+        encoded = base64.b64encode(b"chat-ok").decode("ascii")
+        return TransientResponse(
+            200,
+            payload={
+                "choices": [
+                    {
+                        "message": {
+                            "content": f"data:image/png;base64,{encoded}"
+                        }
+                    }
+                ]
+            },
+        )
+
+    def get(self, *_args, **_kwargs):
+        raise AssertionError("URL download should not be used for Base64 responses")
+
+
+def test_compose_prompt_contains_global_and_page_prompt() -> None:
+    prompt = app.compose_prompt(
+        "Minimal technology style",
+        "Show a workflow",
+        2,
+        5,
+        "Use English for all visible slide text.",
+    )
+    assert "Minimal technology style" in prompt
+    assert "Show a workflow" in prompt
+    assert "slide 2 of 5" in prompt
+    assert "Use English for all visible slide text." in prompt
+    assert "Do not invent brands" in prompt
+
+
+def test_extract_image_bytes_from_base64() -> None:
+    expected = b"image-bytes"
+    payload = {"data": [{"b64_json": base64.b64encode(expected).decode("ascii")}]}
+    assert app.extract_image_bytes(payload, FakeSession()) == expected
+
+
+def test_extract_chat_image_bytes_from_data_url() -> None:
+    expected = b"chat-image"
+    encoded = base64.b64encode(expected).decode("ascii")
+    payload = {
+        "choices": [
+            {
+                "message": {
+                    "content": f"![generated](data:image/png;base64,{encoded})"
+                }
+            }
+        ]
+    }
+    assert app.extract_chat_image_bytes(payload, FakeSession()) == expected
+
+
+def test_extract_chat_image_bytes_from_message_images_url() -> None:
+    payload = {
+        "choices": [
+            {
+                "message": {
+                    "images": [
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": "https://example.com/image.png"},
+                        }
+                    ]
+                }
+            }
+        ]
+    }
+    assert (
+        app.extract_chat_image_bytes(payload, FakeDownloadSession())
+        == b"downloaded-image"
+    )
+
+
+def test_normalize_endpoint_supports_chat_protocol() -> None:
+    assert (
+        app.normalize_endpoint("https://example.com", "chat")
+        == "https://example.com/v1/chat/completions"
+    )
+    assert (
+        app.normalize_endpoint("https://example.com/v1/images/generations", "chat")
+        == "https://example.com/v1/chat/completions"
+    )
+
+
+def test_request_image_translates_group_permission_error(monkeypatch) -> None:
+    monkeypatch.setattr(app.requests, "Session", DeniedSession)
+    with pytest.raises(RuntimeError, match="所属分组未开启图片生成权限"):
+        app.request_image(
+            "https://example.com/v1/images/generations",
+            "test-key",
+            "gpt-image-2",
+            "test prompt",
+            "1024x1024",
+            "low",
+        )
+
+
+def test_request_image_retries_transient_errors(monkeypatch) -> None:
+    TransientThenSuccessSession.calls = 0
+    monkeypatch.setattr(app.requests, "Session", TransientThenSuccessSession)
+    monkeypatch.setattr(app.time, "sleep", lambda _seconds: None)
+    result = app.request_image(
+        "https://example.com/v1/images/generations",
+        "test-key",
+        "gpt-image-2",
+        "test prompt",
+        "1024x1024",
+        "low",
+    )
+    assert result == b"ok"
+    assert TransientThenSuccessSession.calls == 3
+
+
+def test_request_image_translates_upstream_failure(monkeypatch) -> None:
+    monkeypatch.setattr(app.requests, "Session", AlwaysUpstreamFailureSession)
+    monkeypatch.setattr(app.time, "sleep", lambda _seconds: None)
+    with pytest.raises(RuntimeError, match="图片上游连接失败"):
+        app.request_image(
+            "https://example.com/v1/images/generations",
+            "test-key",
+            "gpt-image-2",
+            "test prompt",
+            "1024x1024",
+            "low",
+        )
+
+
+def test_request_image_chat_protocol_uses_model_and_messages(monkeypatch) -> None:
+    ChatSuccessSession.endpoints = []
+    ChatSuccessSession.payloads = []
+    monkeypatch.setattr(app.requests, "Session", ChatSuccessSession)
+    result = app.request_image(
+        "https://example.com",
+        "test-key",
+        "gpt-image-2",
+        "test prompt",
+        "1024x1024",
+        "low",
+        protocol="chat",
+    )
+    assert result == b"chat-ok"
+    assert ChatSuccessSession.endpoints == [
+        "https://example.com/v1/chat/completions"
+    ]
+    assert ChatSuccessSession.payloads[0]["model"] == "gpt-image-2"
+    assert ChatSuccessSession.payloads[0]["messages"][0]["role"] == "user"
+    assert "test prompt" in ChatSuccessSession.payloads[0]["messages"][0]["content"]
+
+
+def test_request_image_reference_uses_chat_multimodal_content(monkeypatch) -> None:
+    ChatSuccessSession.endpoints = []
+    ChatSuccessSession.payloads = []
+    monkeypatch.setattr(app.requests, "Session", ChatSuccessSession)
+    reference = "data:image/png;base64," + base64.b64encode(b"reference").decode("ascii")
+    result = app.request_image(
+        "https://example.com",
+        "test-key",
+        "gpt-image-2",
+        "test prompt",
+        "1024x1024",
+        "low",
+        protocol="auto",
+        reference_images=[reference],
+    )
+    assert result == b"chat-ok"
+    content = ChatSuccessSession.payloads[0]["messages"][0]["content"]
+    assert isinstance(content, list)
+    assert content[0]["type"] == "text"
+    assert content[1] == {"type": "image_url", "image_url": {"url": reference}}
+
+
+def test_validate_payload_maps_style_preset_and_reference_images(monkeypatch) -> None:
+    reference = "data:image/png;base64," + base64.b64encode(b"reference").decode("ascii")
+    deck, api = app.validate_payload(
+        {
+            "api_key": "test-key",
+            "style_preset": "minimal-business",
+            "language": "en",
+            "slides": [{"prompt": "Slide one", "reference_images": [reference]}],
+        }
+    )
+    assert deck["style_name"] == "极简商务"
+    assert deck["language_name"] == "English"
+    assert "Use English" in deck["language_instruction"]
+    assert deck["slides"][0]["reference_images"] == [reference]
+    assert api["protocol"] == "auto"
+
+
+def test_validate_payload_requires_custom_language_requirement() -> None:
+    with pytest.raises(ValueError, match="自定义语言要求"):
+        app.validate_payload(
+            {
+                "api_key": "test-key",
+                "language": "custom",
+                "slides": [{"prompt": "Slide one", "reference_images": []}],
+            }
+        )
+
+
+def test_validate_payload_accepts_custom_language_requirement() -> None:
+    deck, _api = app.validate_payload(
+        {
+            "api_key": "test-key",
+            "language": "custom",
+            "custom_language_requirement": "Use bilingual English and Chinese text.",
+            "slides": [{"prompt": "Slide one", "reference_images": []}],
+        }
+    )
+    assert deck["language_name"] == "自定义要求"
+    assert deck["language_instruction"] == "Use bilingual English and Chinese text."
+
+
+def test_health_endpoint() -> None:
+    client = app.app.test_client()
+    response = client.get("/health")
+    assert response.status_code == 200
+    assert response.get_json() == {"ok": True}
+
+
+def test_generate_requires_key() -> None:
+    client = app.app.test_client()
+    response = client.post(
+        "/api/generate",
+        json={
+            "api_key": "",
+            "page_prompts": ["Slide one"],
+        },
+    )
+    assert response.status_code == 400
+
+
+def test_generation_job_writes_images_and_zip(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(app, "OUTPUT_ROOT", tmp_path)
+    monkeypatch.setattr(app, "request_image", lambda **_kwargs: b"fake-png-data")
+    job_id = "test-job"
+    with app.JOBS_LOCK:
+        app.JOBS[job_id] = {
+            "id": job_id,
+            "status": "queued",
+            "message": "任务已创建",
+            "total": 2,
+            "completed": 0,
+            "failed": 0,
+            "errors": [],
+            "slides": [
+                {"index": 1, "status": "queued"},
+                {"index": 2, "status": "queued"},
+            ],
+        }
+
+    app.run_generation_job(
+        job_id,
+        {
+            "deck_name": "test-deck",
+            "style_preset": "modern-tech",
+            "style_name": "现代科技",
+            "global_style": "Minimal",
+            "language": "en",
+            "language_name": "English",
+            "language_instruction": "Use English for all visible slide text.",
+            "slides": [
+                {"prompt": "Slide one", "reference_images": []},
+                {"prompt": "Slide two", "reference_images": []},
+            ],
+        },
+        {
+            "api_key": "test-key",
+            "base_url": "https://example.com",
+            "model": "gpt-image-2",
+            "size": "1024x1024",
+            "quality": "low",
+            "concurrency": 2,
+            "protocol": "auto",
+        },
+    )
+
+    with app.JOBS_LOCK:
+        assert app.JOBS[job_id]["status"] == "completed"
+        assert app.JOBS[job_id]["completed"] == 2
+    assert (tmp_path / job_id / "images" / "slide-01.png").exists()
+    zip_path = tmp_path / job_id / "test-deck-images.zip"
+    assert zip_path.exists()
+    with zipfile.ZipFile(zip_path) as archive:
+        assert sorted(archive.namelist()) == [
+            "prompts.json",
+            "slide-01.png",
+            "slide-02.png",
+        ]
