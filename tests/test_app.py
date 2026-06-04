@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import base64
+import io
+import json
 import zipfile
 
 import app
@@ -139,6 +141,20 @@ def test_compose_prompt_contains_global_and_page_prompt() -> None:
     assert "slide 2 of 5" in prompt
     assert "Use English for all visible slide text." in prompt
     assert "Do not invent brands" in prompt
+
+
+def test_compose_prompt_includes_deck_addendum_and_reference_context() -> None:
+    prompt = app.compose_prompt(
+        "Minimal business style",
+        "Show pricing options",
+        1,
+        3,
+        "Use English.",
+        "Use restrained charts and avoid stock photos.",
+        "Uploaded PDF uses a dense board-report layout.",
+    )
+    assert "Use restrained charts" in prompt
+    assert "Uploaded PDF uses a dense board-report layout." in prompt
 
 
 def test_extract_image_bytes_from_base64() -> None:
@@ -335,6 +351,48 @@ def test_validate_payload_accepts_custom_style() -> None:
     assert deck["global_style"] == "Cyberpunk blue and purple glassmorphism keynote style."
 
 
+def test_validate_payload_accepts_saved_style_and_global_references(tmp_path, monkeypatch) -> None:
+    style_library = tmp_path / "style-library.json"
+    style_library.write_text(
+        json.dumps(
+            {
+                "styles": [
+                    {
+                        "id": "user-board-report",
+                        "name": "董事会报告",
+                        "prompt": "Quiet executive board report style.",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(app, "STYLE_LIBRARY_PATH", style_library)
+    reference = "data:image/png;base64," + base64.b64encode(b"reference").decode("ascii")
+    deck, _api = app.validate_payload(
+        {
+            "api_key": "test-key",
+            "style_preset": "user-board-report",
+            "global_prompt_addendum": "Avoid decorative gradients.",
+            "reference_context": "Reference deck uses compact tables.",
+            "global_reference_images": [reference],
+            "slides": [
+                {
+                    "prompt": "Slide one",
+                    "model": "gpt-image-2-custom",
+                    "reference_images": [],
+                }
+            ],
+        }
+    )
+    assert deck["style_name"] == "董事会报告"
+    assert deck["global_style"] == "Quiet executive board report style."
+    assert deck["global_prompt_addendum"] == "Avoid decorative gradients."
+    assert deck["reference_context"] == "Reference deck uses compact tables."
+    assert deck["global_reference_images"] == [reference]
+    assert deck["slides"][0]["model"] == "gpt-image-2-custom"
+
+
 def test_validate_payload_requires_custom_style() -> None:
     with pytest.raises(ValueError, match="自定义风格"):
         app.validate_payload(
@@ -375,7 +433,75 @@ def test_health_endpoint() -> None:
     assert response.get_json() == {"ok": True}
 
 
-def test_generate_requires_key() -> None:
+def test_style_library_api_saves_and_deletes_style(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(app, "STYLE_LIBRARY_PATH", tmp_path / "style-library.json")
+    client = app.app.test_client()
+
+    created = client.post(
+        "/api/styles",
+        json={"name": "Investor Brief", "prompt": "Clean investor pitch style."},
+    )
+    assert created.status_code == 200
+    style = created.get_json()["style"]
+    assert style["name"] == "Investor Brief"
+    assert style["builtin"] is False
+
+    listed = client.get("/api/styles")
+    assert listed.status_code == 200
+    assert any(item["id"] == style["id"] for item in listed.get_json()["styles"])
+
+    deleted = client.delete(f"/api/styles/{style['id']}")
+    assert deleted.status_code == 200
+    assert not any(item["id"] == style["id"] for item in deleted.get_json()["styles"])
+
+
+def test_design_prompts_endpoint_returns_model_slides(monkeypatch) -> None:
+    monkeypatch.setattr(
+        app,
+        "request_chat_text_api",
+        lambda *_args, **_kwargs: json.dumps(
+            {
+                "deck_name": "Generated Deck",
+                "summary": "A concise plan.",
+                "slides": [{"title": "Cover", "prompt": "Create a polished cover."}],
+            }
+        ),
+    )
+    client = app.app.test_client()
+    response = client.post(
+        "/api/design/prompts",
+        json={
+            "api_key": "test-key",
+            "instruction": "Create a product launch deck.",
+            "slide_count": 1,
+            "prompt_model": "gpt-5.5",
+        },
+    )
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["deck_name"] == "Generated Deck"
+    assert payload["model"] == "gpt-5.5"
+    assert payload["slides"] == [{"title": "Cover", "prompt": "Create a polished cover."}]
+
+
+def test_reference_upload_accepts_image() -> None:
+    client = app.app.test_client()
+    response = client.post(
+        "/api/references",
+        data={
+            "files": (io.BytesIO(PNG_BYTES), "reference.png"),
+        },
+        content_type="multipart/form-data",
+    )
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["items"][0]["name"] == "reference.png"
+    assert payload["items"][0]["image_count"] == 1
+    assert payload["reference_images"][0].startswith("data:image/")
+
+
+def test_generate_requires_key(monkeypatch) -> None:
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     client = app.app.test_client()
     response = client.post(
         "/api/generate",

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import io
 import json
 import os
 import re
@@ -17,15 +18,33 @@ import requests
 from flask import Flask, Response, jsonify, request, send_file, send_from_directory
 from PIL import Image
 from pptx import Presentation
+from pptx.enum.shapes import MSO_SHAPE_TYPE
 from pptx.util import Inches
+
+try:  # Optional: richer PDF reference handling when installed.
+    import fitz  # PyMuPDF
+except ImportError:  # pragma: no cover - optional dependency
+    fitz = None
+
+try:  # Optional fallback for PDF text extraction.
+    from pypdf import PdfReader
+except ImportError:  # pragma: no cover - optional dependency
+    PdfReader = None
 
 
 ROOT = Path(__file__).resolve().parent
 OUTPUT_ROOT = ROOT / "outputs"
+STYLE_LIBRARY_PATH = ROOT / "style-library.json"
 MAX_SLIDES = 50
 MAX_CONCURRENCY = 20
 MAX_REFERENCE_IMAGES_PER_SLIDE = 3
+MAX_GLOBAL_REFERENCE_IMAGES = 6
+MAX_TOTAL_REFERENCE_IMAGES_PER_SLIDE = 8
 MAX_REFERENCE_IMAGE_DATA_URL_LENGTH = 12_000_000
+MAX_REFERENCE_UPLOADS = 12
+MAX_REFERENCE_FILE_BYTES = 25_000_000
+MAX_REFERENCE_CONTEXT_LENGTH = 12_000
+MAX_CUSTOM_STYLES = 100
 DEFAULT_SLIDE_WIDTH_INCHES = 16
 DEFAULT_SLIDE_HEIGHT_INCHES = 9
 OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
@@ -101,6 +120,132 @@ def clean_text(value: Any, limit: int = 20_000) -> str:
     return str(value or "").strip()[:limit]
 
 
+def style_slug(value: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
+    return slug[:40] or "style"
+
+
+def load_custom_styles() -> list[dict[str, str]]:
+    if not STYLE_LIBRARY_PATH.exists():
+        return []
+    try:
+        raw = json.loads(STYLE_LIBRARY_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    items = raw.get("styles") if isinstance(raw, dict) else raw
+    if not isinstance(items, list):
+        return []
+
+    styles: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        style_id = clean_text(item.get("id"), 80)
+        name = clean_text(item.get("name"), 80)
+        prompt = clean_text(item.get("prompt"), 4000)
+        if not style_id or not name or not prompt:
+            continue
+        if style_id in STYLE_PRESETS or style_id in seen:
+            continue
+        seen.add(style_id)
+        styles.append({"id": style_id, "name": name, "prompt": prompt})
+    return styles[:MAX_CUSTOM_STYLES]
+
+
+def save_custom_styles(styles: list[dict[str, str]]) -> None:
+    payload = {"styles": styles[:MAX_CUSTOM_STYLES]}
+    STYLE_LIBRARY_PATH.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def public_styles() -> list[dict[str, Any]]:
+    builtins = [
+        {
+            "id": style_id,
+            "name": style["name"],
+            "prompt": style["prompt"],
+            "builtin": True,
+        }
+        for style_id, style in STYLE_PRESETS.items()
+    ]
+    custom = [
+        {
+            "id": style["id"],
+            "name": style["name"],
+            "prompt": style["prompt"],
+            "builtin": False,
+        }
+        for style in load_custom_styles()
+    ]
+    return builtins + custom
+
+
+def resolve_style(payload: dict[str, Any]) -> dict[str, str]:
+    style_preset = clean_text(payload.get("style_preset"), 80) or "modern-tech"
+    custom_style = clean_text(payload.get("custom_style"), 4000)
+    custom_style_name = clean_text(payload.get("custom_style_name"), 80)
+
+    if style_preset == "custom":
+        if not custom_style:
+            raise ValueError("选择自定义风格时，请填写具体风格要求")
+        return {
+            "id": "custom",
+            "name": custom_style_name or "自定义风格",
+            "prompt": custom_style,
+        }
+    if style_preset in STYLE_PRESETS:
+        style = STYLE_PRESETS[style_preset]
+        return {"id": style_preset, "name": style["name"], "prompt": style["prompt"]}
+
+    for style in load_custom_styles():
+        if style["id"] == style_preset:
+            return {"id": style["id"], "name": style["name"], "prompt": style["prompt"]}
+    raise ValueError("无效的风格预设")
+
+
+def resolve_language(payload: dict[str, Any]) -> tuple[str, str, str]:
+    language = clean_text(payload.get("language"), 50) or "zh-cn"
+    custom_language_requirement = clean_text(
+        payload.get("custom_language_requirement"), 2000
+    )
+    if language == "custom":
+        if not custom_language_requirement:
+            raise ValueError("选择自定义语言要求时，请填写具体要求")
+        return language, "自定义要求", custom_language_requirement
+    if language in LANGUAGE_PRESETS:
+        preset = LANGUAGE_PRESETS[language]
+        return language, preset["name"], preset["prompt"]
+    raise ValueError("无效的输出语言")
+
+
+def validate_image_data_url(value: Any, label: str) -> str:
+    image = clean_text(value, MAX_REFERENCE_IMAGE_DATA_URL_LENGTH + 1)
+    if len(image) > MAX_REFERENCE_IMAGE_DATA_URL_LENGTH:
+        raise ValueError(f"{label}过大")
+    if not re.match(r"^data:image/(png|jpeg|jpg|webp);base64,", image, re.I):
+        raise ValueError(f"{label}格式无效")
+    return image
+
+
+def validate_reference_images(
+    values: Any,
+    label: str,
+    max_count: int,
+) -> list[str]:
+    values = values or []
+    if not isinstance(values, list):
+        raise ValueError(f"{label}格式无效")
+    if len(values) > max_count:
+        raise ValueError(f"{label}最多 {max_count} 张")
+    return [
+        validate_image_data_url(value, f"{label}第 {index} 张")
+        for index, value in enumerate(values, start=1)
+    ]
+
+
 def safe_filename(value: str, fallback: str = "ppt-images") -> str:
     value = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "-", value).strip(" .-")
     return value[:80] or fallback
@@ -126,8 +271,10 @@ def compose_prompt(
     index: int,
     total: int,
     language_instruction: str = "",
+    global_prompt_addendum: str = "",
+    reference_context: str = "",
 ) -> str:
-    return f"""
+    prompt = f"""
 Create slide {index} of {total} as one polished presentation slide image.
 Aspect ratio: 16:9 landscape.
 
@@ -139,13 +286,30 @@ This slide's content and visual direction:
 
 Output language requirement:
 {language_instruction or "Use the same language as this slide's content prompt."}
+""".strip()
 
+    if global_prompt_addendum:
+        prompt += f"""
+
+Deck-level supplementary instructions:
+{global_prompt_addendum}
+""".rstrip()
+
+    if reference_context:
+        prompt += f"""
+
+Uploaded reference context:
+{reference_context}
+""".rstrip()
+
+    prompt += "\n\n" + """
 Keep the visual language consistent with the full deck. Make the slide readable,
 well composed, and presentation-ready.
 If the slide contains text, follow the output language requirement exactly.
 Do not drift into another language. Render any explicitly provided text verbatim
 when possible. Do not invent brands, logos, watermarks, or signatures.
 """.strip()
+    return prompt
 
 
 def extract_image_bytes(payload: dict[str, Any], session: requests.Session) -> bytes:
@@ -268,6 +432,32 @@ def extract_chat_image_bytes(
     raise RuntimeError("Chat Completions 响应中没有找到图片 Base64 或 URL")
 
 
+def extract_chat_text(payload: dict[str, Any], _session: requests.Session) -> str:
+    choices = payload.get("choices")
+    if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+        raise RuntimeError("Chat Completions 返回结果中没有可识别的 choices")
+    message = choices[0].get("message")
+    if not isinstance(message, dict):
+        raise RuntimeError("Chat Completions 返回结果中没有可识别的 message")
+
+    content = message.get("content")
+    if isinstance(content, str):
+        text = content.strip()
+        if text:
+            return text
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict) and isinstance(item.get("text"), str):
+                parts.append(item["text"])
+        text = "\n".join(part.strip() for part in parts if part.strip()).strip()
+        if text:
+            return text
+    raise RuntimeError("Chat Completions 响应中没有找到文本内容")
+
+
 def translate_api_error(last_response: requests.Response) -> RuntimeError:
     detail = last_response.text[:1500]
     if "Image generation is not enabled for this group" in detail:
@@ -281,12 +471,18 @@ def translate_api_error(last_response: requests.Response) -> RuntimeError:
     return RuntimeError(f"图片 API 请求失败 ({last_response.status_code}): {detail}")
 
 
+def translate_text_api_error(last_response: requests.Response) -> RuntimeError:
+    detail = last_response.text[:1500]
+    return RuntimeError(f"文本模型请求失败 ({last_response.status_code}): {detail}")
+
+
 def request_with_retries(
     endpoint: str,
     headers: dict[str, str],
     payloads: list[dict[str, Any]],
     extractor,
-) -> bytes:
+    error_translator=translate_api_error,
+) -> Any:
     transient_statuses = {429, 500, 502, 503, 504}
 
     with requests.Session() as session:
@@ -318,9 +514,9 @@ def request_with_retries(
                 break
 
         if last_response is None and last_exception is not None:
-            raise RuntimeError(f"图片 API 连接失败: {last_exception}") from last_exception
+            raise RuntimeError(f"API 连接失败: {last_exception}") from last_exception
         assert last_response is not None
-        raise translate_api_error(last_response)
+        raise error_translator(last_response)
 
 
 def request_images_api(
@@ -395,6 +591,35 @@ def request_chat_api(
     return request_with_retries(endpoint, headers, payloads, extract_chat_image_bytes)
 
 
+def request_chat_text_api(
+    base_url: str,
+    api_key: str,
+    model: str,
+    messages: list[dict[str, Any]],
+) -> str:
+    endpoint = normalize_endpoint(base_url, "chat")
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    base_payload = {
+        "model": model,
+        "messages": messages,
+        "temperature": 0.35,
+    }
+    payloads = [
+        {**base_payload, "response_format": {"type": "json_object"}},
+        base_payload,
+    ]
+    return request_with_retries(
+        endpoint,
+        headers,
+        payloads,
+        extract_chat_text,
+        error_translator=translate_text_api_error,
+    )
+
+
 def request_image(
     base_url: str,
     api_key: str,
@@ -433,6 +658,300 @@ def request_image(
         except RuntimeError as exc:
             errors.append(f"{label}: {exc}")
     raise RuntimeError("自动协议尝试失败；" + "；".join(errors))
+
+
+def multimodal_user_content(
+    text: str,
+    reference_images: list[str] | None = None,
+) -> str | list[dict[str, Any]]:
+    reference_images = reference_images or []
+    if not reference_images:
+        return text
+    content: list[dict[str, Any]] = [{"type": "text", "text": text}]
+    content.extend(
+        {"type": "image_url", "image_url": {"url": image}}
+        for image in reference_images
+    )
+    return content
+
+
+def parse_json_object_from_text(text: str) -> dict[str, Any]:
+    text = text.strip()
+    fenced = re.search(r"```(?:json)?\s*(.*?)```", text, flags=re.I | re.S)
+    if fenced:
+        text = fenced.group(1).strip()
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        decoder = json.JSONDecoder()
+        starts = [index for index, char in enumerate(text) if char in "[{"]
+        data = None
+        for start in starts:
+            try:
+                data, _end = decoder.raw_decode(text[start:])
+                break
+            except json.JSONDecodeError:
+                continue
+        if data is None:
+            raise ValueError("文本模型没有返回可解析的 JSON") from None
+    if isinstance(data, list):
+        return {"slides": data}
+    if not isinstance(data, dict):
+        raise ValueError("文本模型返回的 JSON 顶层必须是对象或数组")
+    return data
+
+
+def normalize_designed_deck(
+    data: dict[str, Any],
+    fallback_deck_name: str,
+) -> dict[str, Any]:
+    slides_raw = data.get("slides")
+    if not isinstance(slides_raw, list):
+        raise ValueError("文本模型返回的 JSON 缺少 slides 数组")
+    slides: list[dict[str, str]] = []
+    for index, item in enumerate(slides_raw, start=1):
+        if isinstance(item, str):
+            title = f"第 {index} 页"
+            prompt = item
+        elif isinstance(item, dict):
+            title = clean_text(item.get("title") or f"第 {index} 页", 120)
+            prompt = clean_text(
+                item.get("prompt")
+                or item.get("visual_prompt")
+                or item.get("content")
+                or item.get("description"),
+                6000,
+            )
+            if not prompt:
+                parts = [
+                    clean_text(item.get(key), 1200)
+                    for key in ("objective", "layout", "visual_direction", "speaker_notes")
+                ]
+                prompt = "\n".join(part for part in parts if part)
+        else:
+            continue
+        prompt = clean_text(prompt, 6000)
+        if prompt:
+            slides.append({"title": title, "prompt": prompt})
+    if not slides:
+        raise ValueError("文本模型没有返回有效的页面提示词")
+    return {
+        "deck_name": clean_text(data.get("deck_name"), 200)
+        or fallback_deck_name
+        or "ai-ppt",
+        "slides": slides[:MAX_SLIDES],
+        "summary": clean_text(data.get("summary"), 2000),
+    }
+
+
+def build_prompt_design_messages(
+    brief: str,
+    deck_name: str,
+    slide_count: int,
+    style: dict[str, str],
+    language_instruction: str,
+    global_prompt_addendum: str,
+    reference_context: str,
+    reference_images: list[str],
+) -> list[dict[str, Any]]:
+    user_prompt = f"""
+User deck instruction:
+{brief}
+
+Target deck name:
+{deck_name or "Let the model infer a concise deck name."}
+
+Target slide count:
+{slide_count}
+
+Presentation style name:
+{style["name"]}
+
+Presentation style prompt:
+{style["prompt"]}
+
+Output language requirement:
+{language_instruction}
+
+Additional deck-level instructions:
+{global_prompt_addendum or "None."}
+
+Uploaded file/reference context:
+{reference_context or "None."}
+
+Task:
+Design one high-quality image-generation prompt for every slide in this deck.
+Each prompt must be directly usable by an image generation model to create a
+single 16:9 presentation slide image. Include the intended visible text,
+layout, composition, visual hierarchy, chart/table/data requirements when
+useful, and the visual direction. Keep the prompts coherent as one deck and
+respect the style/reference material.
+
+Return strict JSON only, with this shape:
+{{
+  "deck_name": "short deck name",
+  "summary": "one sentence deck strategy",
+  "slides": [
+    {{"title": "slide title", "prompt": "complete slide image prompt"}}
+  ]
+}}
+""".strip()
+    system_prompt = (
+        "You are a senior presentation strategist and art director. "
+        "You turn a user's rough instruction into a complete slide-by-slide "
+        "prompt plan for generating polished presentation slide images. "
+        "Return valid JSON only."
+    )
+    return [
+        {"role": "system", "content": system_prompt},
+        {
+            "role": "user",
+            "content": multimodal_user_content(user_prompt, reference_images),
+        },
+    ]
+
+
+def image_data_url_from_bytes(data: bytes, fallback_mime: str = "image/png") -> tuple[str, str]:
+    with Image.open(io.BytesIO(data)) as image:
+        image.thumbnail((1600, 1000))
+        has_alpha = image.mode in {"RGBA", "LA"} or (
+            image.mode == "P" and "transparency" in image.info
+        )
+        buffer = io.BytesIO()
+        if has_alpha:
+            image.save(buffer, format="PNG", optimize=True)
+            mime = "image/png"
+        else:
+            image.convert("RGB").save(buffer, format="JPEG", quality=86, optimize=True)
+            mime = "image/jpeg"
+        encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+        return f"data:{mime};base64,{encoded}", f"{image.width}x{image.height}"
+
+
+def text_preview(value: str, limit: int = 2200) -> str:
+    value = re.sub(r"\s+", " ", value).strip()
+    return value[:limit]
+
+
+def process_pdf_reference(
+    name: str,
+    data: bytes,
+    image_slots: int,
+) -> tuple[str, list[str], list[str]]:
+    images: list[str] = []
+    warnings: list[str] = []
+    text_parts: list[str] = []
+    page_count = 0
+
+    if fitz is not None:
+        try:
+            doc = fitz.open(stream=data, filetype="pdf")
+            page_count = len(doc)
+            for page_index in range(min(page_count, 6)):
+                text = doc[page_index].get_text("text").strip()
+                if text:
+                    text_parts.append(f"Page {page_index + 1}: {text_preview(text, 900)}")
+            for page_index in range(min(page_count, image_slots, 3)):
+                page = doc[page_index]
+                pix = page.get_pixmap(matrix=fitz.Matrix(1.5, 1.5), alpha=False)
+                data_url, _size = image_data_url_from_bytes(pix.tobytes("png"))
+                images.append(data_url)
+            doc.close()
+        except Exception as exc:  # noqa: BLE001 - return a user-visible warning
+            warnings.append(f"{name}: PDF 页面预览提取失败：{exc}")
+    elif PdfReader is not None:
+        try:
+            reader = PdfReader(io.BytesIO(data))
+            page_count = len(reader.pages)
+            for page_index, page in enumerate(reader.pages[:6]):
+                text = (page.extract_text() or "").strip()
+                if text:
+                    text_parts.append(f"Page {page_index + 1}: {text_preview(text, 900)}")
+        except Exception as exc:  # noqa: BLE001
+            warnings.append(f"{name}: PDF 文本提取失败：{exc}")
+    else:
+        warnings.append(f"{name}: 未安装 PDF 解析依赖，无法提取参考内容")
+
+    summary = f"{name}: PDF reference"
+    if page_count:
+        summary += f", {page_count} pages"
+    if text_parts:
+        summary += ". Extracted text: " + " | ".join(text_parts)
+    if images:
+        summary += f". Rendered {len(images)} page preview image(s) for visual style reference."
+    return summary, images, warnings
+
+
+def process_pptx_reference(
+    name: str,
+    data: bytes,
+    image_slots: int,
+) -> tuple[str, list[str], list[str]]:
+    images: list[str] = []
+    warnings: list[str] = []
+    slide_summaries: list[str] = []
+    try:
+        presentation = Presentation(io.BytesIO(data))
+    except Exception as exc:  # noqa: BLE001
+        return f"{name}: PPTX reference could not be parsed.", [], [f"{name}: PPTX 解析失败：{exc}"]
+
+    for slide_index, slide in enumerate(presentation.slides, start=1):
+        texts: list[str] = []
+        shape_count = 0
+        picture_count = 0
+        for shape in slide.shapes:
+            shape_count += 1
+            if getattr(shape, "has_text_frame", False) and shape.text:
+                texts.append(text_preview(shape.text, 300))
+            if shape.shape_type == MSO_SHAPE_TYPE.PICTURE:
+                picture_count += 1
+                if len(images) < image_slots:
+                    try:
+                        data_url, _size = image_data_url_from_bytes(shape.image.blob)
+                        images.append(data_url)
+                    except Exception:  # noqa: BLE001
+                        pass
+        if slide_index <= 12:
+            text = " / ".join(text for text in texts if text)
+            slide_summaries.append(
+                f"Slide {slide_index}: {shape_count} shapes, {picture_count} pictures"
+                + (f", text: {text_preview(text, 700)}" if text else "")
+            )
+    summary = (
+        f"{name}: PPTX reference, {len(presentation.slides)} slides. "
+        + " | ".join(slide_summaries)
+    )
+    if images:
+        summary += f". Extracted {len(images)} embedded image(s) for visual reference."
+    return summary, images, warnings
+
+
+def process_reference_file(
+    name: str,
+    data: bytes,
+    content_type: str,
+    image_slots: int,
+) -> tuple[str, list[str], list[str]]:
+    suffix = Path(name).suffix.lower()
+    warnings: list[str] = []
+    if content_type.startswith("image/") or suffix in {".png", ".jpg", ".jpeg", ".webp"}:
+        data_url, size = image_data_url_from_bytes(data)
+        return f"{name}: image reference, {size}.", [data_url], warnings
+    if suffix == ".pdf" or content_type == "application/pdf":
+        return process_pdf_reference(name, data, image_slots)
+    if suffix == ".pptx":
+        return process_pptx_reference(name, data, image_slots)
+    if suffix == ".ppt":
+        warnings.append(f"{name}: 旧版 .ppt 暂不支持直接解析，请另存为 .pptx 或 PDF")
+        return f"{name}: legacy PowerPoint reference uploaded but not parsed.", [], warnings
+    if suffix in {".txt", ".md"} or content_type.startswith("text/"):
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError:
+            text = data.decode("gb18030", errors="ignore")
+        return f"{name}: text reference. {text_preview(text, 3000)}", [], warnings
+    warnings.append(f"{name}: 不支持的参考文件类型，已忽略内容")
+    return f"{name}: unsupported reference file type.", [], warnings
 
 
 def public_job(job: dict[str, Any]) -> dict[str, Any]:
@@ -533,15 +1052,22 @@ def run_generation_job(job_id: str, deck: dict[str, Any], api: dict[str, Any]) -
         {
             "index": index,
             "page_prompt": slide["prompt"],
-            "reference_image_count": len(slide["reference_images"]),
+            "model": slide.get("model") or api["model"],
+            "page_reference_image_count": len(slide["reference_images"]),
+            "global_reference_image_count": len(deck.get("global_reference_images", [])),
             "final_prompt": compose_prompt(
                 deck["global_style"],
                 slide["prompt"],
                 index,
                 len(deck["slides"]),
                 deck["language_instruction"],
+                deck.get("global_prompt_addendum", ""),
+                deck.get("reference_context", ""),
             ),
-            "reference_images": slide["reference_images"],
+            "reference_images": [
+                *deck.get("global_reference_images", []),
+                *slide["reference_images"],
+            ],
         }
         for index, slide in enumerate(deck["slides"], start=1)
     ]
@@ -555,6 +1081,9 @@ def run_generation_job(job_id: str, deck: dict[str, Any], api: dict[str, Any]) -
                 "language": deck["language"],
                 "language_name": deck["language_name"],
                 "language_instruction": deck["language_instruction"],
+                "global_prompt_addendum": deck.get("global_prompt_addendum", ""),
+                "reference_context": deck.get("reference_context", ""),
+                "global_reference_image_count": len(deck.get("global_reference_images", [])),
                 "api_protocol": api.get("protocol", "auto"),
                 "slides": [
                     {
@@ -578,7 +1107,7 @@ def run_generation_job(job_id: str, deck: dict[str, Any], api: dict[str, Any]) -
         image_bytes = request_image(
             base_url=api["base_url"],
             api_key=api["api_key"],
-            model=api["model"],
+            model=record.get("model") or api["model"],
             prompt=record["final_prompt"],
             size=api["size"],
             quality=api["quality"],
@@ -635,6 +1164,20 @@ def run_generation_job(job_id: str, deck: dict[str, Any], api: dict[str, Any]) -
 
 
 def validate_payload(payload: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    global_reference_images = validate_reference_images(
+        payload.get("global_reference_images"),
+        "全局参考图片",
+        MAX_GLOBAL_REFERENCE_IMAGES,
+    )
+    global_prompt_addendum = clean_text(
+        payload.get("global_prompt_addendum") or payload.get("additional_instructions"),
+        6000,
+    )
+    reference_context = clean_text(
+        payload.get("reference_context"),
+        MAX_REFERENCE_CONTEXT_LENGTH,
+    )
+
     slides_raw = payload.get("slides")
     if slides_raw is None:
         page_prompts = payload.get("page_prompts")
@@ -649,24 +1192,20 @@ def validate_payload(payload: dict[str, Any]) -> tuple[dict[str, Any], dict[str,
         if not isinstance(raw, dict):
             raise ValueError(f"第 {index} 页卡片格式无效")
         prompt = clean_text(raw.get("prompt"))
-        references_raw = raw.get("reference_images") or []
-        if not isinstance(references_raw, list):
-            raise ValueError(f"第 {index} 页参考图片格式无效")
-        if len(references_raw) > MAX_REFERENCE_IMAGES_PER_SLIDE:
+        references = validate_reference_images(
+            raw.get("reference_images"),
+            f"第 {index} 页参考图片",
+            MAX_REFERENCE_IMAGES_PER_SLIDE,
+        )
+        if len(global_reference_images) + len(references) > MAX_TOTAL_REFERENCE_IMAGES_PER_SLIDE:
             raise ValueError(
-                f"第 {index} 页最多上传 {MAX_REFERENCE_IMAGES_PER_SLIDE} 张参考图片"
+                f"第 {index} 页全局和本页参考图片合计最多 "
+                f"{MAX_TOTAL_REFERENCE_IMAGES_PER_SLIDE} 张"
             )
-        references: list[str] = []
-        for image_index, value in enumerate(references_raw, start=1):
-            image = clean_text(value, MAX_REFERENCE_IMAGE_DATA_URL_LENGTH + 1)
-            if len(image) > MAX_REFERENCE_IMAGE_DATA_URL_LENGTH:
-                raise ValueError(f"第 {index} 页第 {image_index} 张参考图片过大")
-            if not re.match(r"^data:image/(png|jpeg|jpg|webp);base64,", image, re.I):
-                raise ValueError(f"第 {index} 页第 {image_index} 张参考图片格式无效")
-            references.append(image)
+        model = clean_text(raw.get("model"), 200)
         if not prompt and not references:
             continue
-        slides.append({"prompt": prompt, "reference_images": references})
+        slides.append({"prompt": prompt, "reference_images": references, "model": model})
 
     if not slides:
         raise ValueError("请至少输入一页提示词")
@@ -679,42 +1218,26 @@ def validate_payload(payload: dict[str, Any]) -> tuple[dict[str, Any], dict[str,
     if not api_key:
         raise ValueError("请输入 API Key，或设置 OPENAI_API_KEY 环境变量")
 
-    concurrency = max(1, min(int(payload.get("concurrency") or 2), MAX_CONCURRENCY))
+    try:
+        concurrency = max(1, min(int(payload.get("concurrency") or 2), MAX_CONCURRENCY))
+    except (TypeError, ValueError):
+        raise ValueError("并发页数必须是数字") from None
     protocol = clean_text(payload.get("protocol"), 20) or "auto"
     if protocol not in {"auto", "images", "chat"}:
         raise ValueError("无效的 API 协议")
-    style_preset = clean_text(payload.get("style_preset"), 50) or "modern-tech"
-    custom_style = clean_text(payload.get("custom_style"), 4000)
-    if style_preset == "custom":
-        if not custom_style:
-            raise ValueError("选择自定义风格时，请填写具体风格要求")
-        style = {"name": "自定义风格", "prompt": custom_style}
-    elif style_preset in STYLE_PRESETS:
-        style = STYLE_PRESETS[style_preset]
-    else:
-        raise ValueError("无效的风格预设")
-    language = clean_text(payload.get("language"), 50) or "zh-cn"
-    custom_language_requirement = clean_text(
-        payload.get("custom_language_requirement"), 2000
-    )
-    if language == "custom":
-        if not custom_language_requirement:
-            raise ValueError("选择自定义语言要求时，请填写具体要求")
-        language_name = "自定义要求"
-        language_instruction = custom_language_requirement
-    elif language in LANGUAGE_PRESETS:
-        language_name = LANGUAGE_PRESETS[language]["name"]
-        language_instruction = LANGUAGE_PRESETS[language]["prompt"]
-    else:
-        raise ValueError("无效的输出语言")
+    style = resolve_style(payload)
+    language, language_name, language_instruction = resolve_language(payload)
     deck = {
         "deck_name": clean_text(payload.get("deck_name"), 200) or "ppt-images",
-        "style_preset": style_preset,
+        "style_preset": style["id"],
         "style_name": style["name"],
         "global_style": style["prompt"],
         "language": language,
         "language_name": language_name,
         "language_instruction": language_instruction,
+        "global_prompt_addendum": global_prompt_addendum,
+        "reference_context": reference_context,
+        "global_reference_images": global_reference_images,
         "slides": slides,
     }
     api = {
@@ -747,8 +1270,194 @@ def config() -> Response:
         {
             "base_url": os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1"),
             "model": os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-2"),
+            "prompt_model": os.getenv("OPENAI_TEXT_MODEL", "gpt-5.5"),
             "protocol": os.getenv("OPENAI_IMAGE_PROTOCOL", "auto"),
             "api_key_configured": bool(os.getenv("OPENAI_API_KEY", "").strip()),
+            "styles": public_styles(),
+            "limits": {
+                "max_slides": MAX_SLIDES,
+                "max_global_reference_images": MAX_GLOBAL_REFERENCE_IMAGES,
+                "max_reference_uploads": MAX_REFERENCE_UPLOADS,
+                "max_reference_file_mb": MAX_REFERENCE_FILE_BYTES // 1_000_000,
+            },
+        }
+    )
+
+
+@app.get("/api/styles")
+def list_styles() -> Response:
+    return jsonify({"styles": public_styles()})
+
+
+@app.post("/api/styles")
+def save_style() -> Response:
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"error": "请求内容必须是 JSON"}), 400
+    name = clean_text(payload.get("name"), 80)
+    prompt = clean_text(payload.get("prompt"), 4000)
+    style_id = clean_text(payload.get("id"), 80)
+    if not name:
+        return jsonify({"error": "请填写风格名称"}), 400
+    if not prompt:
+        return jsonify({"error": "请填写风格提示词"}), 400
+
+    styles = load_custom_styles()
+    existing_ids = {style["id"] for style in styles} | set(STYLE_PRESETS)
+    if style_id and style_id in STYLE_PRESETS:
+        return jsonify({"error": "内置风格不能被覆盖"}), 400
+    if not style_id:
+        base = f"user-{style_slug(name)}"
+        style_id = base
+        suffix = 2
+        while style_id in existing_ids:
+            style_id = f"{base}-{suffix}"
+            suffix += 1
+
+    updated = {"id": style_id, "name": name, "prompt": prompt}
+    replaced = False
+    for index, style in enumerate(styles):
+        if style["id"] == style_id:
+            styles[index] = updated
+            replaced = True
+            break
+    if not replaced:
+        if len(styles) >= MAX_CUSTOM_STYLES:
+            return jsonify({"error": f"最多保存 {MAX_CUSTOM_STYLES} 个自定义风格"}), 400
+        styles.append(updated)
+    save_custom_styles(styles)
+    return jsonify({"style": {**updated, "builtin": False}, "styles": public_styles()})
+
+
+@app.delete("/api/styles/<style_id>")
+def delete_style(style_id: str) -> Response:
+    if style_id in STYLE_PRESETS:
+        return jsonify({"error": "内置风格不能删除"}), 400
+    styles = load_custom_styles()
+    next_styles = [style for style in styles if style["id"] != style_id]
+    if len(next_styles) == len(styles):
+        return jsonify({"error": "风格不存在"}), 404
+    save_custom_styles(next_styles)
+    return jsonify({"styles": public_styles()})
+
+
+@app.post("/api/references")
+def upload_references() -> Response:
+    files = request.files.getlist("files")
+    if not files:
+        return jsonify({"error": "请上传参考文件"}), 400
+    if len(files) > MAX_REFERENCE_UPLOADS:
+        return jsonify({"error": f"一次最多上传 {MAX_REFERENCE_UPLOADS} 个参考文件"}), 400
+
+    reference_images: list[str] = []
+    summaries: list[str] = []
+    warnings: list[str] = []
+    items: list[dict[str, Any]] = []
+    for uploaded in files:
+        name = safe_filename(uploaded.filename or "reference", "reference")
+        data = uploaded.read(MAX_REFERENCE_FILE_BYTES + 1)
+        if len(data) > MAX_REFERENCE_FILE_BYTES:
+            warnings.append(f"{name}: 文件超过 {MAX_REFERENCE_FILE_BYTES // 1_000_000}MB，已跳过")
+            continue
+        image_slots = max(0, MAX_GLOBAL_REFERENCE_IMAGES - len(reference_images))
+        try:
+            summary, images, item_warnings = process_reference_file(
+                name,
+                data,
+                uploaded.mimetype or "",
+                image_slots,
+            )
+        except Exception as exc:  # noqa: BLE001 - return a user-visible warning
+            warnings.append(f"{name}: 参考文件处理失败：{exc}")
+            continue
+        images = images[:image_slots]
+        reference_images.extend(images)
+        summaries.append(summary)
+        warnings.extend(item_warnings)
+        items.append(
+            {
+                "name": name,
+                "summary": summary,
+                "image_count": len(images),
+            }
+        )
+
+    reference_context = text_preview(
+        "\n\n".join(summary for summary in summaries if summary),
+        MAX_REFERENCE_CONTEXT_LENGTH,
+    )
+    return jsonify(
+        {
+            "items": items,
+            "reference_images": reference_images,
+            "reference_context": reference_context,
+            "warnings": warnings,
+        }
+    )
+
+
+@app.post("/api/design/prompts")
+def design_prompts() -> Response:
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"error": "请求内容必须是 JSON"}), 400
+    brief = clean_text(payload.get("instruction") or payload.get("brief"), 12_000)
+    if not brief:
+        return jsonify({"error": "请先输入你的 PPT 生成指令"}), 400
+    api_key = clean_text(payload.get("api_key")) or os.getenv("OPENAI_API_KEY", "").strip()
+    if not api_key:
+        return jsonify({"error": "请输入 API Key，或设置 OPENAI_API_KEY 环境变量"}), 400
+    try:
+        slide_count = max(1, min(int(payload.get("slide_count") or 8), MAX_SLIDES))
+        style = resolve_style(payload)
+        _language, _language_name, language_instruction = resolve_language(payload)
+        reference_images = validate_reference_images(
+            payload.get("global_reference_images"),
+            "全局参考图片",
+            MAX_GLOBAL_REFERENCE_IMAGES,
+        )
+    except (TypeError, ValueError) as exc:
+        return jsonify({"error": str(exc)}), 400
+
+    prompt_model = clean_text(payload.get("prompt_model"), 200) or os.getenv(
+        "OPENAI_TEXT_MODEL",
+        "gpt-5.5",
+    )
+    base_url = clean_text(payload.get("base_url"), 1000) or os.getenv(
+        "OPENAI_BASE_URL",
+        "https://api.openai.com/v1",
+    )
+    deck_name = clean_text(payload.get("deck_name"), 200)
+    global_prompt_addendum = clean_text(
+        payload.get("global_prompt_addendum") or payload.get("additional_instructions"),
+        6000,
+    )
+    reference_context = clean_text(
+        payload.get("reference_context"),
+        MAX_REFERENCE_CONTEXT_LENGTH,
+    )
+    messages = build_prompt_design_messages(
+        brief=brief,
+        deck_name=deck_name,
+        slide_count=slide_count,
+        style=style,
+        language_instruction=language_instruction,
+        global_prompt_addendum=global_prompt_addendum,
+        reference_context=reference_context,
+        reference_images=reference_images,
+    )
+    try:
+        text = request_chat_text_api(base_url, api_key, prompt_model, messages)
+        data = parse_json_object_from_text(text)
+        designed = normalize_designed_deck(data, deck_name)
+    except Exception as exc:  # noqa: BLE001 - surface model/API errors in the UI
+        return jsonify({"error": str(exc)}), 502
+    return jsonify(
+        {
+            **designed,
+            "model": prompt_model,
+            "style_preset": style["id"],
+            "style_name": style["name"],
         }
     )
 
@@ -848,30 +1557,26 @@ def _resolve_api_and_deck(payload: dict[str, Any]) -> tuple[dict[str, Any], dict
     protocol = clean_text(payload.get("protocol"), 20) or "auto"
     if protocol not in {"auto", "images", "chat"}:
         raise ValueError("无效的 API 协议")
-    style_preset = clean_text(payload.get("style_preset"), 50) or "modern-tech"
-    custom_style = clean_text(payload.get("custom_style"), 4000)
-    if style_preset == "custom":
-        if not custom_style:
-            raise ValueError("选择自定义风格时，请填写具体风格要求")
-        style = {"name": "自定义风格", "prompt": custom_style}
-    elif style_preset in STYLE_PRESETS:
-        style = STYLE_PRESETS[style_preset]
-    else:
-        raise ValueError("无效的风格预设")
-    language = clean_text(payload.get("language"), 50) or "zh-cn"
-    custom_language_requirement = clean_text(payload.get("custom_language_requirement"), 2000)
-    if language == "custom":
-        if not custom_language_requirement:
-            raise ValueError("选择自定义语言要求时，请填写具体要求")
-        language_instruction = custom_language_requirement
-    elif language in LANGUAGE_PRESETS:
-        language_instruction = LANGUAGE_PRESETS[language]["prompt"]
-    else:
-        raise ValueError("无效的输出语言")
+    style = resolve_style(payload)
+    _language, _language_name, language_instruction = resolve_language(payload)
+    global_reference_images = validate_reference_images(
+        payload.get("global_reference_images"),
+        "全局参考图片",
+        MAX_GLOBAL_REFERENCE_IMAGES,
+    )
     deck = {
-        "style_preset": style_preset,
+        "style_preset": style["id"],
         "global_style": style["prompt"],
         "language_instruction": language_instruction,
+        "global_prompt_addendum": clean_text(
+            payload.get("global_prompt_addendum") or payload.get("additional_instructions"),
+            6000,
+        ),
+        "reference_context": clean_text(
+            payload.get("reference_context"),
+            MAX_REFERENCE_CONTEXT_LENGTH,
+        ),
+        "global_reference_images": global_reference_images,
     }
     api = {
         "api_key": api_key,
@@ -961,6 +1666,9 @@ and any unmentioned content must stay the same.
 Original slide content and intent:
 {page_prompt or "See attached reference image."}
 
+Deck-level supplementary instructions:
+{deck.get("global_prompt_addendum") or "None."}
+
 Modification instructions (apply ONLY these changes):
 {refine_instruction}
 
@@ -1008,17 +1716,24 @@ def generate_single() -> Response:
     if not page_prompt:
         return jsonify({"error": "请填写本页提示词"}), 400
 
-    references_raw = payload.get("reference_images") or []
-    if not isinstance(references_raw, list) or len(references_raw) > MAX_REFERENCE_IMAGES_PER_SLIDE:
-        return jsonify({"error": f"最多 {MAX_REFERENCE_IMAGES_PER_SLIDE} 张参考图片"}), 400
-    references: list[str] = []
-    for i, value in enumerate(references_raw, start=1):
-        image = clean_text(value, MAX_REFERENCE_IMAGE_DATA_URL_LENGTH + 1)
-        if len(image) > MAX_REFERENCE_IMAGE_DATA_URL_LENGTH:
-            return jsonify({"error": f"第 {i} 张参考图片过大"}), 400
-        if not re.match(r"^data:image/(png|jpeg|jpg|webp);base64,", image, re.I):
-            return jsonify({"error": f"第 {i} 张参考图片格式无效"}), 400
-        references.append(image)
+    try:
+        page_references = validate_reference_images(
+            payload.get("reference_images"),
+            "本页参考图片",
+            MAX_REFERENCE_IMAGES_PER_SLIDE,
+        )
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    references = [*deck.get("global_reference_images", []), *page_references]
+    if len(references) > MAX_TOTAL_REFERENCE_IMAGES_PER_SLIDE:
+        return jsonify(
+            {
+                "error": (
+                    "全局和本页参考图片合计最多 "
+                    f"{MAX_TOTAL_REFERENCE_IMAGES_PER_SLIDE} 张"
+                )
+            }
+        ), 400
 
     final_prompt = compose_prompt(
         deck["global_style"],
@@ -1026,6 +1741,8 @@ def generate_single() -> Response:
         slide_index,
         slide_total,
         deck["language_instruction"],
+        deck.get("global_prompt_addendum", ""),
+        deck.get("reference_context", ""),
     )
 
     image_id = uuid.uuid4().hex

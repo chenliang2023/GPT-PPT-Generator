@@ -2,3 +2,5 @@ Flask>=3.0,<4
 requests>=2.32,<3
 Pillow>=10.4,<13
 python-pptx>=1.0,<2
+PyMuPDF>=1.24,<2
+pypdf>=4,<6
