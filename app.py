@@ -836,6 +836,228 @@ def job_download_kind(job_id: str, kind: str):
     return send_file(path, as_attachment=True, download_name=path.name)
 
 
+SINGLES_DIR = OUTPUT_ROOT / "_singles"
+SINGLES_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _resolve_api_and_deck(payload: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Shared validation: returns (deck_context, api)."""
+    api_key = clean_text(payload.get("api_key")) or os.getenv("OPENAI_API_KEY", "").strip()
+    if not api_key:
+        raise ValueError("请输入 API Key，或设置 OPENAI_API_KEY 环境变量")
+    protocol = clean_text(payload.get("protocol"), 20) or "auto"
+    if protocol not in {"auto", "images", "chat"}:
+        raise ValueError("无效的 API 协议")
+    style_preset = clean_text(payload.get("style_preset"), 50) or "modern-tech"
+    custom_style = clean_text(payload.get("custom_style"), 4000)
+    if style_preset == "custom":
+        if not custom_style:
+            raise ValueError("选择自定义风格时，请填写具体风格要求")
+        style = {"name": "自定义风格", "prompt": custom_style}
+    elif style_preset in STYLE_PRESETS:
+        style = STYLE_PRESETS[style_preset]
+    else:
+        raise ValueError("无效的风格预设")
+    language = clean_text(payload.get("language"), 50) or "zh-cn"
+    custom_language_requirement = clean_text(payload.get("custom_language_requirement"), 2000)
+    if language == "custom":
+        if not custom_language_requirement:
+            raise ValueError("选择自定义语言要求时，请填写具体要求")
+        language_instruction = custom_language_requirement
+    elif language in LANGUAGE_PRESETS:
+        language_instruction = LANGUAGE_PRESETS[language]["prompt"]
+    else:
+        raise ValueError("无效的输出语言")
+    deck = {
+        "style_preset": style_preset,
+        "global_style": style["prompt"],
+        "language_instruction": language_instruction,
+    }
+    api = {
+        "api_key": api_key,
+        "base_url": clean_text(payload.get("base_url"), 1000)
+        or os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1"),
+        "model": clean_text(payload.get("model"), 200)
+        or os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-2"),
+        "size": clean_text(payload.get("size"), 50) or "2048x1152",
+        "quality": clean_text(payload.get("quality"), 30) or "high",
+        "protocol": protocol,
+    }
+    return deck, api
+
+
+def _get_image_data_url(url_or_path: str) -> str:
+    """Convert an internal image URL/path to a base64 data URL string."""
+    # Already a data URL
+    if url_or_path.startswith("data:"):
+        return url_or_path
+
+    # Internal single image: /api/singles/<filename>
+    m = re.match(r"/api/singles/(single-[a-f0-9]+\.png)", url_or_path)
+    if m:
+        path = SINGLES_DIR / m.group(1)
+        if path.exists():
+            b64 = base64.b64encode(path.read_bytes()).decode()
+            return f"data:image/png;base64,{b64}"
+
+    # Internal job image: /api/jobs/<job_id>/images/<filename>
+    m = re.match(r"/api/jobs/([^/]+)/images/(slide-\d{2}\.png)", url_or_path)
+    if m:
+        path = OUTPUT_ROOT / m.group(1) / "images" / m.group(2)
+        if path.exists():
+            b64 = base64.b64encode(path.read_bytes()).decode()
+            return f"data:image/png;base64,{b64}"
+
+    # External URL — download it
+    if url_or_path.startswith(("https://", "http://")):
+        try:
+            r = requests.get(url_or_path, timeout=60)
+            r.raise_for_status()
+            b64 = base64.b64encode(r.content).decode()
+            ct = r.headers.get("content-type", "image/png")
+            if "jpeg" in ct or "jpg" in ct:
+                return f"data:image/jpeg;base64,{b64}"
+            return f"data:image/png;base64,{b64}"
+        except Exception:
+            pass
+
+    raise ValueError("无法解析已有图片地址，请确认图片已成功生成")
+
+
+@app.post("/api/generate/refine")
+def generate_refine() -> Response:
+    """Refine an existing slide image based on modification instructions."""
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"error": "请求内容必须是 JSON"}), 400
+    try:
+        deck, api = _resolve_api_and_deck(payload)
+    except (TypeError, ValueError) as exc:
+        return jsonify({"error": str(exc)}), 400
+
+    slide_index = int(payload.get("index", 1))
+    slide_total = int(payload.get("total", 1))
+    page_prompt = clean_text(payload.get("prompt"))
+    refine_instruction = clean_text(payload.get("refine_instruction"))
+    if not refine_instruction:
+        return jsonify({"error": "请填写修改要求"}), 400
+    existing_image_url = clean_text(payload.get("image_url"))
+    if not existing_image_url:
+        return jsonify({"error": "请先生成图片后再进行调整"}), 400
+
+    # Convert the existing image to a data URL for reference
+    try:
+        existing_data_url = _get_image_data_url(existing_image_url)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+    # Build the refine prompt
+    refine_prompt = f"""
+REFINE an existing presentation slide image. Do NOT redesign from scratch.
+Only modify the specific elements described in the instructions below.
+Keep everything else identical — background, layout, fonts, colors, spacing,
+and any unmentioned content must stay the same.
+
+Original slide content and intent:
+{page_prompt or "See attached reference image."}
+
+Modification instructions (apply ONLY these changes):
+{refine_instruction}
+
+Output one refined slide image reflecting only the requested changes.
+Aspect ratio: 16:9 landscape. Presentation-ready quality.
+""".strip()
+
+    # Always use Chat Completions (needs image input)
+    image_id = uuid.uuid4().hex
+    image_path = SINGLES_DIR / f"single-{image_id}.png"
+    try:
+        image_bytes = request_chat_api(
+            base_url=api["base_url"],
+            api_key=api["api_key"],
+            model=api["model"],
+            prompt=refine_prompt,
+            size=api["size"],
+            quality=api["quality"],
+            reference_images=[existing_data_url],
+        )
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 502
+
+    image_path.write_bytes(image_bytes)
+    return jsonify({
+        "image_url": f"/api/singles/{image_path.name}",
+        "status": "completed",
+    })
+
+
+@app.post("/api/generate/single")
+def generate_single() -> Response:
+    """Generate one slide synchronously and return its image URL."""
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"error": "请求内容必须是 JSON"}), 400
+    try:
+        deck, api = _resolve_api_and_deck(payload)
+    except (TypeError, ValueError) as exc:
+        return jsonify({"error": str(exc)}), 400
+
+    slide_index = int(payload.get("index", 1))
+    slide_total = int(payload.get("total", 1))
+    page_prompt = clean_text(payload.get("prompt"))
+    if not page_prompt:
+        return jsonify({"error": "请填写本页提示词"}), 400
+
+    references_raw = payload.get("reference_images") or []
+    if not isinstance(references_raw, list) or len(references_raw) > MAX_REFERENCE_IMAGES_PER_SLIDE:
+        return jsonify({"error": f"最多 {MAX_REFERENCE_IMAGES_PER_SLIDE} 张参考图片"}), 400
+    references: list[str] = []
+    for i, value in enumerate(references_raw, start=1):
+        image = clean_text(value, MAX_REFERENCE_IMAGE_DATA_URL_LENGTH + 1)
+        if len(image) > MAX_REFERENCE_IMAGE_DATA_URL_LENGTH:
+            return jsonify({"error": f"第 {i} 张参考图片过大"}), 400
+        if not re.match(r"^data:image/(png|jpeg|jpg|webp);base64,", image, re.I):
+            return jsonify({"error": f"第 {i} 张参考图片格式无效"}), 400
+        references.append(image)
+
+    final_prompt = compose_prompt(
+        deck["global_style"],
+        page_prompt,
+        slide_index,
+        slide_total,
+        deck["language_instruction"],
+    )
+
+    image_id = uuid.uuid4().hex
+    image_path = SINGLES_DIR / f"single-{image_id}.png"
+    try:
+        image_bytes = request_image(
+            base_url=api["base_url"],
+            api_key=api["api_key"],
+            model=api["model"],
+            prompt=final_prompt,
+            size=api["size"],
+            quality=api["quality"],
+            protocol=api["protocol"],
+            reference_images=references if references else None,
+        )
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 502
+
+    image_path.write_bytes(image_bytes)
+    return jsonify({
+        "image_url": f"/api/singles/{image_path.name}",
+        "status": "completed",
+    })
+
+
+@app.get("/api/singles/<filename>")
+def serve_single(filename: str):
+    if not re.fullmatch(r"single-[a-f0-9]+\.png", filename):
+        return jsonify({"error": "图片文件名无效"}), 400
+    return send_from_directory(str(SINGLES_DIR), filename)
+
+
 INDEX_HTML_PATH = ROOT / "templates" / "index.html"
 
 
