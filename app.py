@@ -15,6 +15,9 @@ from typing import Any
 
 import requests
 from flask import Flask, Response, jsonify, request, send_file, send_from_directory
+from PIL import Image
+from pptx import Presentation
+from pptx.util import Inches
 
 
 ROOT = Path(__file__).resolve().parent
@@ -23,6 +26,8 @@ MAX_SLIDES = 50
 MAX_CONCURRENCY = 20
 MAX_REFERENCE_IMAGES_PER_SLIDE = 3
 MAX_REFERENCE_IMAGE_DATA_URL_LENGTH = 12_000_000
+DEFAULT_SLIDE_WIDTH_INCHES = 16
+DEFAULT_SLIDE_HEIGHT_INCHES = 9
 OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
 
 app = Flask(__name__)
@@ -441,6 +446,7 @@ def public_job(job: dict[str, Any]) -> dict[str, Any]:
         "slides": job["slides"],
         "errors": job["errors"],
         "download_url": job.get("download_url"),
+        "downloads": job.get("downloads", {}),
     }
 
 
@@ -457,6 +463,65 @@ def create_zip(job_dir: Path, deck_name: str) -> Path:
             archive.write(image_path, arcname=image_path.name)
         archive.write(job_dir / "prompts.json", arcname="prompts.json")
     return zip_path
+
+
+def slide_image_paths(job_dir: Path) -> list[Path]:
+    return sorted((job_dir / "images").glob("slide-*.png"))
+
+
+def create_image_pdf(job_dir: Path, deck_name: str) -> Path:
+    image_paths = slide_image_paths(job_dir)
+    if not image_paths:
+        raise RuntimeError("No slide images found for PDF export")
+
+    pdf_path = job_dir / f"{safe_filename(deck_name)}-images.pdf"
+    opened_images: list[Image.Image] = []
+    try:
+        for image_path in image_paths:
+            with Image.open(image_path) as image:
+                opened_images.append(image.convert("RGB"))
+        first, rest = opened_images[0], opened_images[1:]
+        first.save(pdf_path, "PDF", save_all=True, append_images=rest, resolution=150.0)
+    finally:
+        for image in opened_images:
+            image.close()
+    return pdf_path
+
+
+def create_image_pptx(job_dir: Path, deck_name: str) -> Path:
+    image_paths = slide_image_paths(job_dir)
+    if not image_paths:
+        raise RuntimeError("No slide images found for PPTX export")
+
+    pptx_path = job_dir / f"{safe_filename(deck_name)}-image-only.pptx"
+    presentation = Presentation()
+    presentation.slide_width = Inches(DEFAULT_SLIDE_WIDTH_INCHES)
+    presentation.slide_height = Inches(DEFAULT_SLIDE_HEIGHT_INCHES)
+    blank_layout = presentation.slide_layouts[6]
+
+    for image_path in image_paths:
+        slide = presentation.slides.add_slide(blank_layout)
+        slide.shapes.add_picture(
+            str(image_path),
+            0,
+            0,
+            width=presentation.slide_width,
+            height=presentation.slide_height,
+        )
+
+    presentation.save(pptx_path)
+    return pptx_path
+
+
+def create_exports(job_dir: Path, deck_name: str) -> dict[str, str]:
+    zip_path = create_zip(job_dir, deck_name)
+    pdf_path = create_image_pdf(job_dir, deck_name)
+    pptx_path = create_image_pptx(job_dir, deck_name)
+    return {
+        "zip": zip_path.name,
+        "pdf": pdf_path.name,
+        "pptx": pptx_path.name,
+    }
 
 
 def run_generation_job(job_id: str, deck: dict[str, Any], api: dict[str, Any]) -> None:
@@ -555,13 +620,17 @@ def run_generation_job(job_id: str, deck: dict[str, Any], api: dict[str, Any]) -
         )
         return
 
-    update_job(job_id, status="packing", message="图片已生成，正在打包 ZIP")
-    create_zip(job_dir, deck["deck_name"])
+    update_job(job_id, status="packing", message="图片已生成，正在导出 ZIP / PDF / PPTX")
+    exports = create_exports(job_dir, deck["deck_name"])
     update_job(
         job_id,
         status="completed",
-        message="全部图片已生成，可以下载 ZIP",
+        message="全部图片已生成，可以下载 ZIP / PDF / PPTX",
         download_url=f"/api/jobs/{job_id}/download",
+        downloads={
+            key: f"/api/jobs/{job_id}/download/{key}" for key in exports
+        },
+        export_files=exports,
     )
 
 
@@ -615,9 +684,15 @@ def validate_payload(payload: dict[str, Any]) -> tuple[dict[str, Any], dict[str,
     if protocol not in {"auto", "images", "chat"}:
         raise ValueError("无效的 API 协议")
     style_preset = clean_text(payload.get("style_preset"), 50) or "modern-tech"
-    if style_preset not in STYLE_PRESETS:
+    custom_style = clean_text(payload.get("custom_style"), 4000)
+    if style_preset == "custom":
+        if not custom_style:
+            raise ValueError("选择自定义风格时，请填写具体风格要求")
+        style = {"name": "自定义风格", "prompt": custom_style}
+    elif style_preset in STYLE_PRESETS:
+        style = STYLE_PRESETS[style_preset]
+    else:
         raise ValueError("无效的风格预设")
-    style = STYLE_PRESETS[style_preset]
     language = clean_text(payload.get("language"), 50) or "zh-cn"
     custom_language_requirement = clean_text(
         payload.get("custom_language_requirement"), 2000
@@ -658,7 +733,7 @@ def validate_payload(payload: dict[str, Any]) -> tuple[dict[str, Any], dict[str,
 
 @app.get("/")
 def index() -> Response:
-    return Response(INDEX_HTML, mimetype="text/html")
+    return Response(INDEX_HTML_PATH.read_text(encoding="utf-8"), mimetype="text/html")
 
 
 @app.get("/health")
@@ -734,388 +809,34 @@ def job_image(job_id: str, filename: str):
 
 @app.get("/api/jobs/<job_id>/download")
 def job_download(job_id: str):
+    return job_download_kind(job_id, "zip")
+
+
+@app.get("/api/jobs/<job_id>/download/<kind>")
+def job_download_kind(job_id: str, kind: str):
+    if kind not in {"zip", "pdf", "pptx"}:
+        return jsonify({"error": "下载类型无效"}), 400
     with JOBS_LOCK:
         job = JOBS.get(job_id)
         if job is None:
             return jsonify({"error": "任务不存在"}), 404
         if job["status"] != "completed":
             return jsonify({"error": "图片尚未生成完成"}), 409
-    zip_files = list((OUTPUT_ROOT / job_id).glob("*.zip"))
-    if not zip_files:
-        return jsonify({"error": "找不到 ZIP 文件"}), 404
-    return send_file(zip_files[0], as_attachment=True, download_name=zip_files[0].name)
+        filename = job.get("export_files", {}).get(kind)
+    if not filename:
+        pattern = {"zip": "*.zip", "pdf": "*.pdf", "pptx": "*.pptx"}[kind]
+        files = list((OUTPUT_ROOT / job_id).glob(pattern))
+        if files:
+            filename = files[0].name
+    if not filename:
+        return jsonify({"error": "找不到导出文件"}), 404
+    path = OUTPUT_ROOT / job_id / filename
+    if not path.exists():
+        return jsonify({"error": "导出文件不存在"}), 404
+    return send_file(path, as_attachment=True, download_name=path.name)
 
 
-INDEX_HTML = r"""<!doctype html>
-<html lang="zh-CN">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Image2 PPT 图片批量生成器</title>
-  <style>
-    :root {
-      --bg: #f0fdfa; --surface: #ffffff; --soft: #f7fffd; --text: #134e4a;
-      --muted: #475569; --line: #b9e7df; --primary: #0d9488;
-      --primary-dark: #0f766e; --accent: #f97316; --danger: #b91c1c;
-    }
-    * { box-sizing: border-box; }
-    body {
-      margin: 0; background: var(--bg); color: var(--text);
-      font-family: "Microsoft YaHei", "Segoe UI", Arial, sans-serif; line-height: 1.5;
-    }
-    button, input, textarea, select { font: inherit; }
-    button { cursor: pointer; }
-    .shell { width: min(1060px, calc(100% - 32px)); margin: 0 auto; padding: 42px 0 64px; }
-    .hero {
-      display: grid; grid-template-columns: 1fr auto; gap: 24px; align-items: end;
-      padding-bottom: 24px; border-bottom: 1px solid var(--line);
-    }
-    .eyebrow { margin: 0 0 8px; color: var(--primary-dark); font-size: 13px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; }
-    h1 { margin: 0; font-size: clamp(30px, 5vw, 50px); line-height: 1.08; }
-    .hero p { max-width: 720px; margin: 14px 0 0; color: var(--muted); }
-    .badge { align-self: start; padding: 8px 12px; border: 1px solid var(--line); border-radius: 999px; background: var(--surface); color: var(--primary-dark); font-size: 13px; font-weight: 700; white-space: nowrap; }
-    .section { margin-top: 26px; padding: 22px; border: 1px solid var(--line); border-radius: 14px; background: var(--surface); }
-    .section-head { display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; margin-bottom: 18px; }
-    h2 { margin: 0; font-size: 20px; }
-    .hint { margin: 5px 0 0; color: var(--muted); font-size: 13px; }
-    .grid { display: grid; gap: 14px; }
-    .grid-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-    .grid-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-    label { display: grid; gap: 7px; color: var(--text); font-size: 13px; font-weight: 700; }
-    input, textarea, select {
-      width: 100%; border: 1px solid #a7d8d0; border-radius: 10px; background: #fff;
-      color: #0f172a; padding: 10px 12px; outline: none;
-      transition: border-color 160ms ease, background 160ms ease;
-    }
-    textarea { min-height: 120px; resize: vertical; }
-    input:focus, textarea:focus, select:focus { border-color: var(--primary); background: var(--soft); }
-    .btn { border: 1px solid transparent; border-radius: 10px; padding: 10px 15px; font-weight: 700; transition: background 160ms ease, border-color 160ms ease; }
-    .btn-primary { background: var(--accent); color: #fff; }
-    .btn-primary:hover { background: #ea580c; }
-    .btn-primary:disabled { cursor: not-allowed; opacity: .6; }
-    .actions { display: flex; justify-content: space-between; align-items: center; gap: 14px; margin-top: 18px; }
-    .note { margin-top: 14px; padding: 12px 14px; border-left: 3px solid var(--primary); background: var(--soft); color: var(--primary-dark); font-size: 13px; }
-    .slide-cards { display: grid; gap: 14px; }
-    .slide-card { padding: 16px; border: 1px solid var(--line); border-left: 4px solid var(--primary); border-radius: 12px; background: var(--soft); }
-    .slide-card-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 12px; }
-    .slide-card h3 { margin: 0; font-size: 15px; }
-    .btn-secondary { background: #fff; border-color: var(--line); color: var(--primary-dark); }
-    .btn-secondary:hover { border-color: var(--primary); background: var(--soft); }
-    .btn-danger { padding: 6px 10px; background: transparent; color: var(--danger); }
-    .btn-danger:hover { background: #fef2f2; }
-    .file-input { padding: 8px; background: #fff; }
-    .reference-previews { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
-    .reference-thumb { position: relative; width: 116px; overflow: hidden; border: 1px solid var(--line); border-radius: 8px; background: #fff; }
-    .reference-thumb img { display: block; width: 100%; aspect-ratio: 16/9; object-fit: cover; }
-    .reference-thumb button { position: absolute; top: 4px; right: 4px; width: 22px; height: 22px; padding: 0; border: 0; border-radius: 50%; background: rgba(15, 23, 42, .78); color: #fff; line-height: 1; }
-    .status { display: none; }
-    .status.active { display: block; }
-    .progress-track { height: 10px; overflow: hidden; border-radius: 999px; background: #ccfbf1; }
-    .progress-bar { width: 0; height: 100%; background: var(--primary); transition: width 250ms ease; }
-    .status-line { display: flex; justify-content: space-between; gap: 12px; margin: 12px 0 8px; color: var(--muted); font-size: 13px; }
-    .preview-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-top: 18px; }
-    .preview { margin: 0; overflow: hidden; border: 1px solid var(--line); border-radius: 10px; background: #fff; }
-    .preview img { display: block; width: 100%; aspect-ratio: 16/9; object-fit: cover; }
-    .preview figcaption { padding: 8px 10px; color: var(--muted); font-size: 12px; }
-    .error-list { margin: 12px 0 0; color: var(--danger); font-size: 13px; white-space: pre-wrap; }
-    .download { display: none; text-decoration: none; }
-    .download.visible { display: inline-flex; }
-    footer { margin-top: 24px; color: var(--muted); font-size: 12px; text-align: center; }
-    @media (max-width: 760px) {
-      .shell { width: min(100% - 20px, 1060px); padding-top: 24px; }
-      .hero, .grid-2, .grid-3 { grid-template-columns: 1fr; }
-      .section { padding: 16px; }
-      .section-head, .actions { align-items: stretch; flex-direction: column; }
-      .preview-grid { grid-template-columns: 1fr; }
-    }
-    @media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition: none !important; } }
-  </style>
-</head>
-<body>
-  <main class="shell">
-    <header class="hero">
-      <div>
-        <p class="eyebrow">Local batch image utility</p>
-        <h1>Image2 PPT 图片批量生成器</h1>
-        <p>输入 PPT 整体风格和每页提示词，并行调用 GPT image2 或兼容中转站，生成可下载的幻灯片图片包。</p>
-      </div>
-      <div class="badge">API Key 不写入磁盘</div>
-    </header>
-
-    <section class="section">
-      <div class="section-head">
-        <div><h2>1. API 配置</h2><p class="hint">支持 OpenAI 官方地址、标准 Images API，以及使用 Chat Completions 出图的兼容中转站。</p></div>
-      </div>
-      <div class="grid grid-3">
-        <label>Base URL<input id="baseUrl" type="url" value="https://api.openai.com/v1" placeholder="https://api.openai.com/v1"></label>
-        <label>API Key<input id="apiKey" type="password" autocomplete="off" placeholder="留空时使用 OPENAI_API_KEY"></label>
-        <label>模型<input id="model" value="gpt-image-2" placeholder="gpt-image-2"></label>
-        <label>API 协议
-          <select id="protocol">
-            <option value="auto" selected>自动（推荐）</option>
-            <option value="images">Images API</option>
-            <option value="chat">Chat Completions</option>
-          </select>
-        </label>
-        <label>图片尺寸
-          <select id="size">
-            <option value="2048x1152">2048x1152（推荐 16:9）</option>
-            <option value="3840x2160">3840x2160（4K 16:9）</option>
-            <option value="1536x1024">1536x1024（兼容性较高）</option>
-            <option value="1024x1024">1024x1024（快速测试）</option>
-          </select>
-        </label>
-        <label>质量
-          <select id="quality"><option value="high">high</option><option value="medium">medium</option><option value="low">low</option><option value="auto">auto</option></select>
-        </label>
-        <label>并发页数
-          <select id="concurrency"></select>
-        </label>
-      </div>
-      <p class="note">
-        中转站配置示例：Base URL 填 <code>http://216.234.142.96:3000</code> 或 <code>https://www.dreamfield.top</code>，不要手动加 <code>/v1/images/generations</code>；API Key 填中转站提供的 Key；模型填 <code>gpt-image-2</code>。协议建议选“自动”，如果中转站说明使用 <code>/v1/chat/completions</code> 出图，就选 “Chat Completions”。并发越高速度可能越快，但也更容易触发中转站限流，建议先从 2-5 开始。
-      </p>
-    </section>
-
-    <section class="section">
-      <div class="section-head">
-        <div><h2>2. 风格与页面卡片</h2><p class="hint">选择固定风格，每张卡片可以输入文本并上传最多 3 张参考图片。</p></div>
-        <button class="btn btn-secondary" id="addSlide" type="button">添加一页</button>
-      </div>
-      <div class="grid grid-2">
-        <label>图片包名称<input id="deckName" value="image2-ppt" placeholder="用于 ZIP 文件名"></label>
-        <label>固定风格
-          <select id="stylePreset">
-            <option value="modern-tech">现代科技</option>
-            <option value="minimal-business">极简商务</option>
-            <option value="dark-luxury">深色高级</option>
-            <option value="colorful-creative">多彩创意</option>
-            <option value="data-report">数据报告</option>
-            <option value="chinese-red">中国红</option>
-          </select>
-        </label>
-        <label>输出语言
-          <select id="language">
-            <option value="zh-cn">简体中文</option>
-            <option value="zh-tw">繁体中文</option>
-            <option value="en">English</option>
-            <option value="ja">日本語</option>
-            <option value="ko">한국어</option>
-            <option value="fr">Français</option>
-            <option value="de">Deutsch</option>
-            <option value="es">Español</option>
-            <option value="custom">自定义要求</option>
-          </select>
-        </label>
-        <label id="customLanguageLabel" style="display:none">自定义语言要求
-          <input id="customLanguageRequirement" placeholder="例如：标题英文，正文简体中文；或中英双语对照。">
-        </label>
-      </div>
-      <p class="note">输出语言会统一注入每一页提示词。有参考图片的页面会自动使用 Chat Completions 多模态格式；所有页面仍会按“并发页数”并行生成。</p>
-      <div class="slide-cards" id="slideCards"></div>
-      <div class="actions">
-        <span class="hint" id="pageCount">0 页</span>
-        <button class="btn btn-primary" id="generate" type="button">并行生成图片</button>
-      </div>
-    </section>
-
-    <section class="section status" id="status">
-      <div class="section-head">
-        <div><h2>生成进度</h2><p class="hint" id="statusMessage">准备中</p></div>
-        <a class="btn btn-primary download" id="download" href="#">下载 ZIP</a>
-      </div>
-      <div class="status-line"><span id="progressText">0 / 0</span><span id="statusState">queued</span></div>
-      <div class="progress-track"><div class="progress-bar" id="progressBar"></div></div>
-      <div class="error-list" id="errors"></div>
-      <div class="preview-grid" id="previews"></div>
-    </section>
-
-    <footer>生成结果保存在本项目的 outputs 目录中。</footer>
-  </main>
-  <script>
-    const slideCardsEl = document.getElementById("slideCards");
-    const statusEl = document.getElementById("status");
-    const generateBtn = document.getElementById("generate");
-    let pollTimer = null;
-
-    function updatePageCount() {
-      document.getElementById("pageCount").textContent = `${slideCardsEl.querySelectorAll(".slide-card").length} 页`;
-    }
-
-    function renderReferencePreviews(card) {
-      const previews = card.querySelector(".reference-previews");
-      previews.innerHTML = "";
-      (card.referenceImages || []).forEach((source, index) => {
-        const wrapper = document.createElement("div");
-        wrapper.className = "reference-thumb";
-        const image = document.createElement("img");
-        image.src = source;
-        image.alt = `参考图 ${index + 1}`;
-        const remove = document.createElement("button");
-        remove.type = "button";
-        remove.textContent = "×";
-        remove.setAttribute("aria-label", `删除参考图 ${index + 1}`);
-        remove.addEventListener("click", () => {
-          card.referenceImages.splice(index, 1);
-          renderReferencePreviews(card);
-        });
-        wrapper.append(image, remove);
-        previews.appendChild(wrapper);
-      });
-    }
-
-    function addSlide(values = {}) {
-      const card = document.createElement("article");
-      card.className = "slide-card";
-      card.referenceImages = values.reference_images || [];
-      card.innerHTML = `
-        <div class="slide-card-head">
-          <h3></h3>
-          <button class="btn btn-danger remove-slide" type="button">删除</button>
-        </div>
-        <label>本页提示词
-          <textarea class="slide-prompt" placeholder="描述本页主题、需要出现的文字、构图和视觉重点。"></textarea>
-        </label>
-        <label style="margin-top:12px">参考图片（可选，最多 3 张）
-          <input class="file-input" type="file" accept="image/png,image/jpeg,image/webp" multiple>
-        </label>
-        <div class="reference-previews"></div>
-      `;
-      card.querySelector(".slide-prompt").value = values.prompt || "";
-      card.querySelector(".remove-slide").addEventListener("click", () => {
-        card.remove();
-        renumberSlides();
-      });
-      card.querySelector(".file-input").addEventListener("change", async event => {
-        const files = [...event.target.files];
-        const remaining = Math.max(0, 3 - card.referenceImages.length);
-        for (const file of files.slice(0, remaining)) {
-          card.referenceImages.push(await readFileAsDataUrl(file));
-        }
-        event.target.value = "";
-        renderReferencePreviews(card);
-      });
-      slideCardsEl.appendChild(card);
-      renderReferencePreviews(card);
-      renumberSlides();
-    }
-
-    function readFileAsDataUrl(file) {
-      return new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = () => resolve(reader.result);
-        reader.onerror = () => reject(new Error(`无法读取图片：${file.name}`));
-        reader.readAsDataURL(file);
-      });
-    }
-
-    function renumberSlides() {
-      [...slideCardsEl.querySelectorAll(".slide-card")].forEach((card, index) => {
-        card.querySelector("h3").textContent = `第 ${index + 1} 页`;
-      });
-      updatePageCount();
-    }
-
-    function collectSlides() {
-      return [...slideCardsEl.querySelectorAll(".slide-card")].map(card => ({
-        prompt: card.querySelector(".slide-prompt").value.trim(),
-        reference_images: card.referenceImages || []
-      }));
-    }
-
-    function updateLanguageRequirementVisibility() {
-      const isCustom = document.getElementById("language").value === "custom";
-      document.getElementById("customLanguageLabel").style.display = isCustom ? "grid" : "none";
-    }
-
-    function populateConcurrencyOptions() {
-      const select = document.getElementById("concurrency");
-      select.innerHTML = "";
-      for (let value = 1; value <= 20; value += 1) {
-        const option = document.createElement("option");
-        option.value = String(value);
-        option.textContent = String(value);
-        if (value === 2) option.selected = true;
-        select.appendChild(option);
-      }
-    }
-    function renderJob(job) {
-      statusEl.classList.add("active");
-      document.getElementById("statusMessage").textContent = job.message;
-      document.getElementById("statusState").textContent = job.status;
-      document.getElementById("progressText").textContent = `${job.completed} / ${job.total}`;
-      document.getElementById("progressBar").style.width = `${job.total ? Math.round(job.completed / job.total * 100) : 0}%`;
-      document.getElementById("errors").textContent = (job.errors || []).join("\n");
-      const previews = document.getElementById("previews");
-      previews.innerHTML = "";
-      (job.slides || []).filter(slide => slide.image_url).forEach(slide => {
-        const figure = document.createElement("figure"); figure.className = "preview";
-        const image = document.createElement("img"); image.src = slide.image_url; image.alt = `第 ${slide.index} 页`;
-        const caption = document.createElement("figcaption"); caption.textContent = `第 ${slide.index} 页`;
-        figure.append(image, caption); previews.appendChild(figure);
-      });
-      const download = document.getElementById("download");
-      if (job.download_url) { download.href = job.download_url; download.classList.add("visible"); }
-      else { download.classList.remove("visible"); }
-    }
-    async function pollJob(jobId) {
-      const response = await fetch(`/api/jobs/${jobId}`);
-      const job = await response.json();
-      renderJob(job);
-      if (job.status === "completed" || job.status === "failed") {
-        clearInterval(pollTimer); pollTimer = null; generateBtn.disabled = false; generateBtn.textContent = "并行生成图片";
-      }
-    }
-    async function startGeneration() {
-      generateBtn.disabled = true; generateBtn.textContent = "正在创建任务...";
-      document.getElementById("errors").textContent = ""; document.getElementById("download").classList.remove("visible");
-      try {
-        const response = await fetch("/api/generate", {
-          method: "POST", headers: {"Content-Type": "application/json"},
-          body: JSON.stringify({
-            base_url: document.getElementById("baseUrl").value.trim(),
-            api_key: document.getElementById("apiKey").value.trim(),
-            model: document.getElementById("model").value.trim(),
-            protocol: document.getElementById("protocol").value,
-            size: document.getElementById("size").value,
-            quality: document.getElementById("quality").value,
-            concurrency: Number(document.getElementById("concurrency").value),
-            deck_name: document.getElementById("deckName").value.trim(),
-            style_preset: document.getElementById("stylePreset").value,
-            language: document.getElementById("language").value,
-            custom_language_requirement: document.getElementById("customLanguageRequirement").value.trim(),
-            slides: collectSlides()
-          })
-        });
-        const result = await response.json();
-        if (!response.ok) throw new Error(result.error || "创建任务失败");
-        await pollJob(result.job_id);
-        pollTimer = setInterval(() => pollJob(result.job_id), 1500);
-      } catch (error) {
-        statusEl.classList.add("active"); document.getElementById("errors").textContent = error.message;
-        generateBtn.disabled = false; generateBtn.textContent = "并行生成图片";
-      }
-    }
-    async function loadConfig() {
-      try {
-        const response = await fetch("/api/config"); const config = await response.json();
-        document.getElementById("baseUrl").value = config.base_url; document.getElementById("model").value = config.model;
-        if (["auto", "images", "chat"].includes(config.protocol)) document.getElementById("protocol").value = config.protocol;
-        if (config.api_key_configured) document.getElementById("apiKey").placeholder = "已检测到 OPENAI_API_KEY，可留空";
-      } catch (_) {}
-    }
-    document.getElementById("addSlide").addEventListener("click", () => addSlide());
-    document.getElementById("language").addEventListener("change", updateLanguageRequirementVisibility);
-    generateBtn.addEventListener("click", startGeneration);
-    populateConcurrencyOptions();
-    addSlide({ prompt: "封面：生成式 AI 如何重塑内容生产。左侧使用醒目标题区域，右侧使用抽象智能网络与内容创作图形，保持大留白。" });
-    addSlide({ prompt: "展示传统线性内容生产流程向实时智能共创循环转变，使用清晰的流程关系和现代信息图构图。" });
-    updateLanguageRequirementVisibility();
-    loadConfig();
-  </script>
-</body>
-</html>
-"""
+INDEX_HTML_PATH = ROOT / "templates" / "index.html"
 
 
 if __name__ == "__main__":

@@ -5,6 +5,13 @@ import zipfile
 
 import app
 import pytest
+from pptx import Presentation
+
+
+PNG_BYTES = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMC"
+    "AO+/p9sAAAAASUVORK5CYII="
+)
 
 
 class FakeSession:
@@ -315,6 +322,30 @@ def test_validate_payload_accepts_custom_language_requirement() -> None:
     assert deck["language_instruction"] == "Use bilingual English and Chinese text."
 
 
+def test_validate_payload_accepts_custom_style() -> None:
+    deck, _api = app.validate_payload(
+        {
+            "api_key": "test-key",
+            "style_preset": "custom",
+            "custom_style": "Cyberpunk blue and purple glassmorphism keynote style.",
+            "slides": [{"prompt": "Slide one", "reference_images": []}],
+        }
+    )
+    assert deck["style_name"] == "自定义风格"
+    assert deck["global_style"] == "Cyberpunk blue and purple glassmorphism keynote style."
+
+
+def test_validate_payload_requires_custom_style() -> None:
+    with pytest.raises(ValueError, match="自定义风格"):
+        app.validate_payload(
+            {
+                "api_key": "test-key",
+                "style_preset": "custom",
+                "slides": [{"prompt": "Slide one", "reference_images": []}],
+            }
+        )
+
+
 def test_validate_payload_allows_concurrency_up_to_20() -> None:
     _deck, api = app.validate_payload(
         {
@@ -356,9 +387,9 @@ def test_generate_requires_key() -> None:
     assert response.status_code == 400
 
 
-def test_generation_job_writes_images_and_zip(tmp_path, monkeypatch) -> None:
+def test_generation_job_writes_export_files(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(app, "OUTPUT_ROOT", tmp_path)
-    monkeypatch.setattr(app, "request_image", lambda **_kwargs: b"fake-png-data")
+    monkeypatch.setattr(app, "request_image", lambda **_kwargs: PNG_BYTES)
     job_id = "test-job"
     with app.JOBS_LOCK:
         app.JOBS[job_id] = {
@@ -404,12 +435,23 @@ def test_generation_job_writes_images_and_zip(tmp_path, monkeypatch) -> None:
     with app.JOBS_LOCK:
         assert app.JOBS[job_id]["status"] == "completed"
         assert app.JOBS[job_id]["completed"] == 2
+        assert app.JOBS[job_id]["downloads"] == {
+            "zip": f"/api/jobs/{job_id}/download/zip",
+            "pdf": f"/api/jobs/{job_id}/download/pdf",
+            "pptx": f"/api/jobs/{job_id}/download/pptx",
+        }
     assert (tmp_path / job_id / "images" / "slide-01.png").exists()
     zip_path = tmp_path / job_id / "test-deck-images.zip"
+    pdf_path = tmp_path / job_id / "test-deck-images.pdf"
+    pptx_path = tmp_path / job_id / "test-deck-image-only.pptx"
     assert zip_path.exists()
+    assert pdf_path.exists()
+    assert pptx_path.exists()
     with zipfile.ZipFile(zip_path) as archive:
         assert sorted(archive.namelist()) == [
             "prompts.json",
             "slide-01.png",
             "slide-02.png",
         ]
+    presentation = Presentation(pptx_path)
+    assert len(presentation.slides) == 2
