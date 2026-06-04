@@ -282,7 +282,7 @@
     .brief-chip b { font-size: 15px; line-height: 1.15; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .settings-strip {
       display: grid;
-      grid-template-columns: 1.15fr 0.6fr 0.9fr 1fr 1fr;
+      grid-template-columns: 1.15fr 0.6fr 1fr 1fr;
       gap: 10px;
       padding: 12px;
       border: 1px solid var(--line);
@@ -557,6 +557,15 @@
     }
     .modal-head h2 { margin: 0; font-size: 17px; }
     .modal-body { padding: 20px; }
+    .settings-group {
+      display: grid;
+      gap: 12px;
+      padding: 14px;
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      background: rgba(245,248,252,0.62);
+    }
+    .settings-group h3 { margin: 0; font-size: 14px; }
     .style-list { display: grid; gap: 10px; max-height: 310px; overflow: auto; }
     .style-row {
       border: 1px solid var(--line); border-radius: 18px; padding: 12px;
@@ -690,14 +699,6 @@
             </label>
             <label>页数
               <input id="slideCount" type="number" min="1" max="50" value="8">
-            </label>
-            <label>提示词模型
-              <select id="promptModel">
-                <option value="gpt-5.5">gpt-5.5</option>
-                <option value="gpt-5.1">gpt-5.1</option>
-                <option value="gpt-5">gpt-5</option>
-                <option value="gpt-4.1">gpt-4.1</option>
-              </select>
             </label>
             <label>整体风格
               <select id="styleSelect"></select>
@@ -867,49 +868,85 @@
         <button class="btn small" data-close="settingsModal">关闭</button>
       </div>
       <div class="modal-body stack">
-        <div class="grid-2">
-          <label>Base URL
-            <input id="baseUrl" placeholder="https://api.openai.com/v1">
+        <div class="settings-group">
+          <h3>GPT 分析</h3>
+          <div class="grid-2">
+            <label>Base URL
+              <input id="promptBaseUrl" placeholder="https://api.openai.com/v1">
+            </label>
+            <label>API Key
+              <input id="promptApiKey" type="password" autocomplete="off" placeholder="保存在当前浏览器">
+            </label>
+          </div>
+          <label>提示词模型
+            <select id="promptModel">
+              <option value="gpt-5.5">gpt-5.5</option>
+              <option value="gpt-5.1">gpt-5.1</option>
+              <option value="gpt-5">gpt-5</option>
+              <option value="gpt-4.1">gpt-4.1</option>
+            </select>
           </label>
-          <label>API Key
-            <input id="apiKey" type="password" autocomplete="off" placeholder="仅保存在当前浏览器页面状态">
-          </label>
+          <div class="toolbar">
+            <button id="testPromptApiBtn" class="btn small" type="button">测试 GPT</button>
+            <button id="fetchPromptModelsBtn" class="btn small" type="button">拉取模型</button>
+            <span id="promptApiStatus" class="panel-sub"></span>
+          </div>
         </div>
-        <div class="grid-3">
-          <label>默认图片模型
-            <select id="imageModel">
-              <option value="gpt-image-2">gpt-image-2</option>
-              <option value="gpt-image-1">gpt-image-1</option>
-              <option value="dall-e-3">dall-e-3</option>
-            </select>
-          </label>
-          <label>API 协议
-            <select id="protocol">
-              <option value="auto">自动</option>
-              <option value="images">Images API</option>
-              <option value="chat">Chat Completions</option>
-            </select>
-          </label>
-          <label>并发
-            <select id="concurrency"></select>
-          </label>
+        <div class="settings-group">
+          <h3>Image 生成</h3>
+          <div class="grid-2">
+            <label>Base URL
+              <input id="imageBaseUrl" placeholder="https://api.openai.com/v1">
+            </label>
+            <label>API Key
+              <input id="imageApiKey" type="password" autocomplete="off" placeholder="保存在当前浏览器">
+            </label>
+          </div>
+          <div class="grid-3">
+            <label>默认图片模型
+              <select id="imageModel">
+                <option value="gpt-image-2">gpt-image-2</option>
+                <option value="gpt-image-1">gpt-image-1</option>
+                <option value="dall-e-3">dall-e-3</option>
+              </select>
+            </label>
+            <label>API 协议
+              <select id="protocol">
+                <option value="auto">自动</option>
+                <option value="images">Images API</option>
+                <option value="chat">Chat Completions</option>
+              </select>
+            </label>
+            <label>并发
+              <select id="concurrency"></select>
+            </label>
+          </div>
+          <div class="grid-2">
+            <label>图片尺寸
+              <select id="size">
+                <option value="2048x1152">2048x1152</option>
+                <option value="1536x864">1536x864</option>
+                <option value="1024x576">1024x576</option>
+                <option value="1024x1024">1024x1024</option>
+              </select>
+            </label>
+            <label>质量
+              <select id="quality">
+                <option value="high">high</option>
+                <option value="medium">medium</option>
+                <option value="low">low</option>
+              </select>
+            </label>
+          </div>
+          <div class="toolbar">
+            <button id="testImageApiBtn" class="btn small" type="button">测试 Image</button>
+            <button id="fetchImageModelsBtn" class="btn small" type="button">拉取模型</button>
+            <span id="imageApiStatus" class="panel-sub"></span>
+          </div>
         </div>
-        <div class="grid-2">
-          <label>图片尺寸
-            <select id="size">
-              <option value="2048x1152">2048x1152</option>
-              <option value="1536x864">1536x864</option>
-              <option value="1024x576">1024x576</option>
-              <option value="1024x1024">1024x1024</option>
-            </select>
-          </label>
-          <label>质量
-            <select id="quality">
-              <option value="high">high</option>
-              <option value="medium">medium</option>
-              <option value="low">low</option>
-            </select>
-          </label>
+        <div class="toolbar">
+          <button id="clearSettingsBtn" class="btn">清空保存</button>
+          <button id="saveSettingsBtn" class="btn primary">保存设置</button>
         </div>
       </div>
     </div>
@@ -978,6 +1015,19 @@
 
   <script>
     const $ = (id) => document.getElementById(id);
+    const SETTINGS_STORAGE_KEY = "image2ppt-api-settings";
+    const SAVED_SETTING_IDS = [
+      "promptBaseUrl",
+      "promptApiKey",
+      "imageBaseUrl",
+      "imageApiKey",
+      "imageModel",
+      "promptModel",
+      "protocol",
+      "concurrency",
+      "size",
+      "quality",
+    ];
     const state = {
       styles: [],
       slides: [],
@@ -988,6 +1038,9 @@
       pollTimer: null,
       lastJobId: "",
       apiKeyConfigured: false,
+      promptApiKeyConfigured: false,
+      imageApiKeyConfigured: false,
+      exportBusy: false,
     };
 
     function uid() {
@@ -1039,6 +1092,60 @@
       }
     }
 
+    function readSavedSettings() {
+      try {
+        return JSON.parse(localStorage.getItem(SETTINGS_STORAGE_KEY) || "{}");
+      } catch (_error) {
+        return {};
+      }
+    }
+
+    function setFieldValue(id, value) {
+      if (value === undefined || value === null || value === "") return;
+      const field = $(id);
+      if (!field) return;
+      if (field.tagName === "SELECT") {
+        setSelectValue(id, String(value));
+        return;
+      }
+      field.value = String(value);
+    }
+
+    function applySavedSettings() {
+      const saved = readSavedSettings();
+      SAVED_SETTING_IDS.forEach((id) => setFieldValue(id, saved[id]));
+    }
+
+    function collectSavedSettings() {
+      return Object.fromEntries(
+        SAVED_SETTING_IDS.map((id) => [id, $(id)?.value || ""])
+      );
+    }
+
+    function saveSettings(showToast = false) {
+      try {
+        localStorage.setItem(
+          SETTINGS_STORAGE_KEY,
+          JSON.stringify(collectSavedSettings())
+        );
+        if (showToast) toast("设置已保存");
+      } catch (error) {
+        if (showToast) toast(`设置保存失败：${error.message}`);
+      }
+      setConfigStatus();
+    }
+
+    function clearSavedSettings() {
+      try {
+        localStorage.removeItem(SETTINGS_STORAGE_KEY);
+      } catch (_error) {
+        // Ignore storage failures; the visible fields can still be cleared.
+      }
+      ["promptApiKey", "imageApiKey"].forEach((id) => { $(id).value = ""; });
+      setConfigStatus();
+      toast("已清空本地保存的 API Key");
+    }
+
     function renderStyleSelect(preferred) {
       const select = $("styleSelect");
       const selected = preferred || select.value || "paper-grain-editorial";
@@ -1085,22 +1192,33 @@
     }
 
     function setConfigStatus() {
-      const ready = Boolean($("apiKey").value.trim()) || state.apiKeyConfigured;
+      const promptReady = Boolean($("promptApiKey").value.trim()) || state.promptApiKeyConfigured;
+      const imageReady = Boolean($("imageApiKey").value.trim()) || state.imageApiKeyConfigured;
+      const ready = promptReady && imageReady;
       const status = $("configStatus");
       status.classList.toggle("ready", ready);
-      status.querySelector("span:last-child").textContent = ready ? "API 已配置" : "API 未配置";
+      status.querySelector("span:last-child").textContent = ready
+        ? "API 已配置"
+        : promptReady || imageReady
+        ? "API 部分配置"
+        : "API 未配置";
     }
 
     async function loadConfig() {
       try {
         const response = await fetch("/api/config");
         const config = await response.json();
-        $("baseUrl").value = config.base_url || "https://api.openai.com/v1";
+        $("promptBaseUrl").value = config.prompt_base_url || config.base_url || "https://api.openai.com/v1";
+        $("imageBaseUrl").value = config.image_base_url || config.base_url || "https://api.openai.com/v1";
         setSelectValue("imageModel", config.model || "gpt-image-2");
         setSelectValue("promptModel", config.prompt_model || "gpt-5.5");
         if (["auto", "images", "chat"].includes(config.protocol)) $("protocol").value = config.protocol;
         state.apiKeyConfigured = Boolean(config.api_key_configured);
-        if (state.apiKeyConfigured) $("apiKey").placeholder = "已检测到环境变量 OPENAI_API_KEY，可留空";
+        state.promptApiKeyConfigured = Boolean(config.prompt_api_key_configured ?? config.api_key_configured);
+        state.imageApiKeyConfigured = Boolean(config.image_api_key_configured ?? config.api_key_configured);
+        if (state.promptApiKeyConfigured) $("promptApiKey").placeholder = "已检测到环境变量，可留空";
+        if (state.imageApiKeyConfigured) $("imageApiKey").placeholder = "已检测到环境变量，可留空";
+        applySavedSettings();
         state.styles = Array.isArray(config.styles) ? config.styles : [];
         renderStyleSelect();
         setConfigStatus();
@@ -1111,8 +1229,12 @@
 
     function deckPayload() {
       return {
-        api_key: $("apiKey").value.trim(),
-        base_url: $("baseUrl").value.trim(),
+        api_key: $("imageApiKey").value.trim(),
+        base_url: $("imageBaseUrl").value.trim(),
+        prompt_api_key: $("promptApiKey").value.trim(),
+        prompt_base_url: $("promptBaseUrl").value.trim(),
+        image_api_key: $("imageApiKey").value.trim(),
+        image_base_url: $("imageBaseUrl").value.trim(),
         protocol: $("protocol").value,
         model: $("imageModel").value.trim(),
         size: $("size").value,
@@ -1126,6 +1248,84 @@
         reference_context: state.referenceContext,
         global_reference_images: state.globalReferenceImages,
       };
+    }
+
+    function apiSettingsPayload(target) {
+      const isPrompt = target === "prompt";
+      return {
+        target,
+        api_key: (isPrompt ? $("promptApiKey") : $("imageApiKey")).value.trim(),
+        base_url: (isPrompt ? $("promptBaseUrl") : $("imageBaseUrl")).value.trim(),
+        prompt_api_key: $("promptApiKey").value.trim(),
+        prompt_base_url: $("promptBaseUrl").value.trim(),
+        image_api_key: $("imageApiKey").value.trim(),
+        image_base_url: $("imageBaseUrl").value.trim(),
+      };
+    }
+
+    function setApiStatus(target, message) {
+      const id = target === "prompt" ? "promptApiStatus" : "imageApiStatus";
+      $(id).textContent = message;
+    }
+
+    function fillModelSelect(id, models) {
+      const select = $(id);
+      const current = select.value;
+      select.innerHTML = "";
+      models.forEach((model) => select.appendChild(new Option(model, model)));
+      if (current && !models.includes(current)) {
+        select.insertBefore(new Option(current, current), select.firstChild);
+      }
+      if (current) select.value = current;
+      saveSettings(false);
+    }
+
+    async function testApi(target) {
+      const btn = $(target === "prompt" ? "testPromptApiBtn" : "testImageApiBtn");
+      btn.disabled = true;
+      setApiStatus(target, "测试中...");
+      try {
+        const response = await fetch("/api/settings/test", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(apiSettingsPayload(target)),
+        });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || "API 测试失败");
+        setApiStatus(target, `连接正常，识别到 ${result.model_count || 0} 个模型`);
+        toast(target === "prompt" ? "GPT API 测试通过" : "Image API 测试通过");
+      } catch (error) {
+        setApiStatus(target, error.message);
+        toast(error.message);
+      } finally {
+        btn.disabled = false;
+      }
+    }
+
+    async function fetchModels(target) {
+      const isPrompt = target === "prompt";
+      const btn = $(isPrompt ? "fetchPromptModelsBtn" : "fetchImageModelsBtn");
+      btn.disabled = true;
+      setApiStatus(target, "拉取模型中...");
+      try {
+        const response = await fetch("/api/settings/models", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(apiSettingsPayload(target)),
+        });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || "模型拉取失败");
+        const models = Array.isArray(result.models) ? result.models : [];
+        if (!models.length) throw new Error("模型列表为空");
+        fillModelSelect(isPrompt ? "promptModel" : "imageModel", models);
+        setApiStatus(target, `已拉取 ${models.length} 个模型`);
+        toast("模型列表已更新");
+      } catch (error) {
+        setApiStatus(target, error.message);
+        toast(error.message);
+      } finally {
+        btn.disabled = false;
+      }
     }
 
     function renderReferences() {
@@ -1171,7 +1371,55 @@
       }
     }
 
-    function setMetrics(total = state.slides.length, completed = 0, failed = 0) {
+    function slideCompleted(slide) {
+      return slide.status === "completed" || Boolean(slide.image_url);
+    }
+
+    function allSlidesHaveImages() {
+      return state.slides.length > 0 && state.slides.every((slide) => Boolean(slide.image_url));
+    }
+
+    function exportActionLabel() {
+      return allSlidesHaveImages() ? "导出已有页面" : "生成全部 PPT";
+    }
+
+    function setGenerateButtons(disabled, text = exportActionLabel()) {
+      ["generateAllBtn", "exportAgainBtn"].forEach((id) => {
+        const btn = $(id);
+        if (!btn) return;
+        btn.disabled = disabled;
+        btn.textContent = text;
+      });
+    }
+
+    function refreshGenerateButtons() {
+      if (!state.exportBusy) setGenerateButtons(false);
+    }
+
+    function clearDownloadLinks() {
+      ["downloadZip", "downloadPdf", "downloadPptx"].forEach((id) => {
+        const link = $(id);
+        link.classList.remove("visible");
+        link.removeAttribute("href");
+      });
+    }
+
+    function renderDownloadLinks(downloads = {}) {
+      const map = { zip: "downloadZip", pdf: "downloadPdf", pptx: "downloadPptx" };
+      Object.entries(map).forEach(([kind, id]) => {
+        const link = $(id);
+        if (downloads[kind]) {
+          link.href = downloads[kind];
+          link.classList.add("visible");
+        }
+      });
+    }
+
+    function setMetrics(
+      total = state.slides.length,
+      completed = state.slides.filter(slideCompleted).length,
+      failed = state.slides.filter((slide) => slide.status === "failed").length
+    ) {
       $("metricSlides").textContent = String(total);
       $("metricDone").textContent = String(completed);
       $("metricFailed").textContent = String(failed);
@@ -1245,6 +1493,7 @@
         </article>
       `).join("");
       setMetrics();
+      refreshGenerateButtons();
     }
 
     function addSlide(data = {}) {
@@ -1343,7 +1592,62 @@
       }));
     }
 
+    async function exportExistingSlides() {
+      if (!state.slides.length) {
+        toast("没有可导出的页面");
+        return;
+      }
+      const missingIndex = state.slides.findIndex((slide) => !slide.image_url);
+      if (missingIndex >= 0) {
+        toast(`第 ${missingIndex + 1} 页还没有生成图片`);
+        return;
+      }
+      state.exportBusy = true;
+      setGenerateButtons(true, "正在打包...");
+      clearDownloadLinks();
+      $("statusText").textContent = "正在打包已有页面...";
+      $("errorBox").textContent = "";
+      try {
+        const response = await fetch("/api/export/existing", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            ...deckPayload(),
+            slides: state.slides.map((slide) => ({
+              title: slide.title,
+              prompt: slide.prompt,
+              image_url: slide.image_url,
+            })),
+          }),
+        });
+        const job = await response.json();
+        if (!response.ok) throw new Error(job.error || (job.errors || []).join("\n") || "导出失败");
+        state.lastJobId = job.id;
+        $("statusText").textContent = job.message || "已有页面已打包";
+        (job.slides || []).forEach((remote, index) => {
+          const slide = state.slides[index];
+          if (!slide) return;
+          slide.status = remote.status || "completed";
+          if (remote.image_url) slide.image_url = remote.image_url;
+        });
+        renderSlides();
+        setMetrics(job.total || state.slides.length, job.completed || state.slides.length, job.failed || 0);
+        renderDownloadLinks(job.downloads || {});
+        toast("导出文件已生成");
+      } catch (error) {
+        $("errorBox").textContent = error.message;
+        toast(error.message);
+      } finally {
+        state.exportBusy = false;
+        setGenerateButtons(false);
+      }
+    }
+
     async function generateAll() {
+      if (allSlidesHaveImages()) {
+        await exportExistingSlides();
+        return;
+      }
       const slides = generationSlides();
       if (!slides.length) {
         toast("没有可生成的页面");
@@ -1354,11 +1658,10 @@
         toast(`第 ${emptyIndex + 1} 页没有提示词`);
         return;
       }
-      const btn = $("generateAllBtn");
-      btn.disabled = true;
-      btn.textContent = "创建任务...";
+      state.exportBusy = true;
+      setGenerateButtons(true, "创建任务...");
       $("errorBox").textContent = "";
-      ["downloadZip", "downloadPdf", "downloadPptx"].forEach((id) => $(id).classList.remove("visible"));
+      clearDownloadLinks();
       state.slides.forEach((slide) => { slide.status = "queued"; slide.error = ""; });
       renderSlides();
       try {
@@ -1377,8 +1680,8 @@
       } catch (error) {
         $("errorBox").textContent = error.message;
         toast(error.message);
-        btn.disabled = false;
-        btn.textContent = "生成全部 PPT";
+        state.exportBusy = false;
+        setGenerateButtons(false);
       }
     }
 
@@ -1388,10 +1691,6 @@
         const job = await response.json();
         if (!response.ok) throw new Error(job.error || "任务状态读取失败");
         $("statusText").textContent = job.message || job.status;
-        $("metricSlides").textContent = String(job.total || 0);
-        $("metricDone").textContent = String(job.completed || 0);
-        $("metricFailed").textContent = String(job.failed || 0);
-        $("progressBar").style.width = `${job.total ? Math.round((job.completed / job.total) * 100) : 0}%`;
         $("errorBox").textContent = (job.errors || []).join("\n");
         (job.slides || []).forEach((remote, index) => {
           const slide = state.slides[index];
@@ -1401,20 +1700,13 @@
           if (remote.image_url) slide.image_url = remote.image_url;
         });
         renderSlides();
-        const downloads = job.downloads || {};
-        const map = { zip: "downloadZip", pdf: "downloadPdf", pptx: "downloadPptx" };
-        Object.entries(map).forEach(([kind, id]) => {
-          const link = $(id);
-          if (downloads[kind]) {
-            link.href = downloads[kind];
-            link.classList.add("visible");
-          }
-        });
+        setMetrics(job.total || state.slides.length, job.completed || 0, job.failed || 0);
+        renderDownloadLinks(job.downloads || {});
         if (job.status === "completed" || job.status === "failed") {
           clearInterval(state.pollTimer);
           state.pollTimer = null;
-          $("generateAllBtn").disabled = false;
-          $("generateAllBtn").textContent = "生成全部 PPT";
+          state.exportBusy = false;
+          setGenerateButtons(false);
           toast(job.status === "completed" ? "全部页面已生成" : "生成任务失败");
         }
       } catch (error) {
@@ -1626,6 +1918,10 @@
         view.classList.toggle("active", view.id === viewId);
       });
       activateNav(target);
+      if (target === "exports") {
+        setMetrics();
+        refreshGenerateButtons();
+      }
       window.scrollTo({ top: 0, behavior: "smooth" });
     }
 
@@ -1723,7 +2019,18 @@
           document.querySelectorAll(".modal.active").forEach((modal) => closeModal(modal.id));
         }
       });
-      $("apiKey").addEventListener("input", setConfigStatus);
+      SAVED_SETTING_IDS.forEach((id) => {
+        const field = $(id);
+        if (!field) return;
+        field.addEventListener("input", () => saveSettings(false));
+        field.addEventListener("change", () => saveSettings(false));
+      });
+      $("saveSettingsBtn").addEventListener("click", () => saveSettings(true));
+      $("clearSettingsBtn").addEventListener("click", clearSavedSettings);
+      $("testPromptApiBtn").addEventListener("click", () => testApi("prompt"));
+      $("fetchPromptModelsBtn").addEventListener("click", () => fetchModels("prompt"));
+      $("testImageApiBtn").addEventListener("click", () => testApi("image"));
+      $("fetchImageModelsBtn").addEventListener("click", () => fetchModels("image"));
       $("languageSelect").addEventListener("change", updateLanguageVisibility);
       $("slideCount").addEventListener("input", updateBriefSummary);
       $("referenceFiles").addEventListener("change", (event) => {

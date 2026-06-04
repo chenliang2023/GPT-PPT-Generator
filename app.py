@@ -246,16 +246,21 @@ def safe_filename(value: str, fallback: str = "ppt-images") -> str:
     return value[:80] or fallback
 
 
-def normalize_endpoint(base_url: str, protocol: str = "images") -> str:
+def normalize_api_base(base_url: str) -> str:
     base_url = base_url.strip().rstrip("/")
     if not base_url:
         base_url = "https://api.openai.com/v1"
-    for suffix in ("/images/generations", "/chat/completions"):
+    for suffix in ("/images/generations", "/chat/completions", "/models"):
         if base_url.endswith(suffix):
             base_url = base_url[: -len(suffix)]
             break
     if not base_url.endswith("/v1"):
         base_url = f"{base_url}/v1"
+    return base_url
+
+
+def normalize_endpoint(base_url: str, protocol: str = "images") -> str:
+    base_url = normalize_api_base(base_url)
     suffix = "/chat/completions" if protocol == "chat" else "/images/generations"
     return f"{base_url}{suffix}"
 
@@ -334,6 +339,25 @@ def extract_image_bytes(payload: dict[str, Any], session: requests.Session) -> b
         return response.content
 
     raise RuntimeError("图片 API 结果中没有 b64_json 或 url")
+
+
+def image_data_url_to_png_bytes(value: str) -> bytes:
+    match = re.match(r"^data:image/[^;]+;base64,(.+)$", value, re.I | re.S)
+    if not match:
+        raise ValueError("图片地址不是有效的 data URL")
+    try:
+        raw = base64.b64decode(match.group(1), validate=False)
+    except (ValueError, binascii.Error) as exc:
+        raise ValueError("图片 data URL 中的 Base64 无效") from exc
+    try:
+        with Image.open(io.BytesIO(raw)) as image:
+            if image.mode not in {"RGB", "RGBA"}:
+                image = image.convert("RGBA")
+            output = io.BytesIO()
+            image.save(output, format="PNG")
+            return output.getvalue()
+    except Exception as exc:  # noqa: BLE001 - surface invalid image details
+        raise ValueError(f"图片数据无法识别: {exc}") from exc
 
 
 def image_bytes_from_string(
@@ -469,6 +493,93 @@ def translate_api_error(last_response: requests.Response) -> RuntimeError:
 def translate_text_api_error(last_response: requests.Response) -> RuntimeError:
     detail = last_response.text[:1500]
     return RuntimeError(f"文本模型请求失败 ({last_response.status_code}): {detail}")
+
+
+def extract_model_ids(payload: dict[str, Any]) -> list[str]:
+    candidates = payload.get("data")
+    if not isinstance(candidates, list):
+        candidates = payload.get("models")
+    if not isinstance(candidates, list):
+        nested = payload.get("data")
+        if isinstance(nested, dict):
+            candidates = nested.get("models")
+    if not isinstance(candidates, list):
+        return []
+
+    models: list[str] = []
+    seen: set[str] = set()
+    for item in candidates:
+        model_id = ""
+        if isinstance(item, str):
+            model_id = item
+        elif isinstance(item, dict):
+            raw_id = item.get("id") or item.get("name") or item.get("model")
+            if isinstance(raw_id, str):
+                model_id = raw_id
+        model_id = clean_text(model_id, 200)
+        if model_id and model_id not in seen:
+            seen.add(model_id)
+            models.append(model_id)
+    return models
+
+
+def request_model_list(base_url: str, api_key: str) -> list[str]:
+    endpoint = f"{normalize_api_base(base_url)}/models"
+    headers = {"Authorization": f"Bearer {api_key}"}
+    try:
+        with requests.Session() as session:
+            response = session.get(endpoint, headers=headers, timeout=60)
+    except requests.RequestException as exc:
+        raise RuntimeError(f"模型列表连接失败: {exc}") from exc
+    if not response.ok:
+        detail = response.text[:1500]
+        raise RuntimeError(f"模型列表请求失败 ({response.status_code}): {detail}")
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise RuntimeError("模型列表响应不是有效 JSON") from exc
+    models = extract_model_ids(payload)
+    if not models:
+        raise RuntimeError("模型列表响应中没有可识别的模型 ID")
+    return models
+
+
+def resolve_api_settings(payload: dict[str, Any]) -> tuple[str, str, str]:
+    target = clean_text(payload.get("target"), 20) or "image"
+    default_base_url = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+    if target == "prompt":
+        api_key = (
+            clean_text(payload.get("prompt_api_key"))
+            or clean_text(payload.get("api_key"))
+            or os.getenv("OPENAI_TEXT_API_KEY", "").strip()
+            or os.getenv("OPENAI_API_KEY", "").strip()
+        )
+        base_url = (
+            clean_text(payload.get("prompt_base_url"), 1000)
+            or clean_text(payload.get("base_url"), 1000)
+            or os.getenv("OPENAI_TEXT_BASE_URL", "").strip()
+            or default_base_url
+        )
+        label = "GPT 分析"
+    elif target == "image":
+        api_key = (
+            clean_text(payload.get("image_api_key"))
+            or clean_text(payload.get("api_key"))
+            or os.getenv("OPENAI_IMAGE_API_KEY", "").strip()
+            or os.getenv("OPENAI_API_KEY", "").strip()
+        )
+        base_url = (
+            clean_text(payload.get("image_base_url"), 1000)
+            or clean_text(payload.get("base_url"), 1000)
+            or os.getenv("OPENAI_IMAGE_BASE_URL", "").strip()
+            or default_base_url
+        )
+        label = "Image 生成"
+    else:
+        raise ValueError("无效的 API 测试目标")
+    if not api_key:
+        raise ValueError(f"请输入 {label} API Key")
+    return target, base_url, api_key
 
 
 def request_with_retries(
@@ -1207,11 +1318,14 @@ def validate_payload(payload: dict[str, Any]) -> tuple[dict[str, Any], dict[str,
     if len(slides) > MAX_SLIDES:
         raise ValueError(f"一次最多生成 {MAX_SLIDES} 页")
 
-    api_key = clean_text(payload.get("api_key")) or os.getenv(
-        "OPENAI_API_KEY", ""
-    ).strip()
+    api_key = (
+        clean_text(payload.get("image_api_key"))
+        or clean_text(payload.get("api_key"))
+        or os.getenv("OPENAI_IMAGE_API_KEY", "").strip()
+        or os.getenv("OPENAI_API_KEY", "").strip()
+    )
     if not api_key:
-        raise ValueError("请输入 API Key，或设置 OPENAI_API_KEY 环境变量")
+        raise ValueError("请输入 Image 生成 API Key，或设置 OPENAI_IMAGE_API_KEY / OPENAI_API_KEY 环境变量")
 
     try:
         concurrency = max(1, min(int(payload.get("concurrency") or 2), MAX_CONCURRENCY))
@@ -1237,8 +1351,12 @@ def validate_payload(payload: dict[str, Any]) -> tuple[dict[str, Any], dict[str,
     }
     api = {
         "api_key": api_key,
-        "base_url": clean_text(payload.get("base_url"), 1000)
-        or os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1"),
+        "base_url": (
+            clean_text(payload.get("image_base_url"), 1000)
+            or clean_text(payload.get("base_url"), 1000)
+            or os.getenv("OPENAI_IMAGE_BASE_URL", "").strip()
+            or os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+        ),
         "model": clean_text(payload.get("model"), 200)
         or os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-2"),
         "size": clean_text(payload.get("size"), 50) or "2048x1152",
@@ -1261,13 +1379,28 @@ def health() -> Response:
 
 @app.get("/api/config")
 def config() -> Response:
+    default_base_url = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+    image_base_url = os.getenv("OPENAI_IMAGE_BASE_URL", "").strip() or default_base_url
+    prompt_base_url = os.getenv("OPENAI_TEXT_BASE_URL", "").strip() or default_base_url
+    image_key_configured = bool(
+        os.getenv("OPENAI_IMAGE_API_KEY", "").strip()
+        or os.getenv("OPENAI_API_KEY", "").strip()
+    )
+    prompt_key_configured = bool(
+        os.getenv("OPENAI_TEXT_API_KEY", "").strip()
+        or os.getenv("OPENAI_API_KEY", "").strip()
+    )
     return jsonify(
         {
-            "base_url": os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1"),
+            "base_url": default_base_url,
+            "image_base_url": image_base_url,
+            "prompt_base_url": prompt_base_url,
             "model": os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-2"),
             "prompt_model": os.getenv("OPENAI_TEXT_MODEL", "gpt-5.5"),
             "protocol": os.getenv("OPENAI_IMAGE_PROTOCOL", "auto"),
             "api_key_configured": bool(os.getenv("OPENAI_API_KEY", "").strip()),
+            "image_api_key_configured": image_key_configured,
+            "prompt_api_key_configured": prompt_key_configured,
             "styles": public_styles(),
             "limits": {
                 "max_slides": MAX_SLIDES,
@@ -1275,6 +1408,50 @@ def config() -> Response:
                 "max_reference_uploads": MAX_REFERENCE_UPLOADS,
                 "max_reference_file_mb": MAX_REFERENCE_FILE_BYTES // 1_000_000,
             },
+        }
+    )
+
+
+@app.post("/api/settings/test")
+def test_api_settings() -> Response:
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"error": "请求内容必须是 JSON"}), 400
+    try:
+        target, base_url, api_key = resolve_api_settings(payload)
+        models = request_model_list(base_url, api_key)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except Exception as exc:  # noqa: BLE001 - surface API/proxy errors in UI
+        return jsonify({"error": str(exc)}), 502
+    return jsonify(
+        {
+            "ok": True,
+            "target": target,
+            "base_url": normalize_api_base(base_url),
+            "model_count": len(models),
+            "models_preview": models[:12],
+        }
+    )
+
+
+@app.post("/api/settings/models")
+def list_api_models() -> Response:
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"error": "请求内容必须是 JSON"}), 400
+    try:
+        target, base_url, api_key = resolve_api_settings(payload)
+        models = request_model_list(base_url, api_key)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except Exception as exc:  # noqa: BLE001 - surface API/proxy errors in UI
+        return jsonify({"error": str(exc)}), 502
+    return jsonify(
+        {
+            "target": target,
+            "base_url": normalize_api_base(base_url),
+            "models": models,
         }
     )
 
@@ -1399,9 +1576,14 @@ def design_prompts() -> Response:
     brief = clean_text(payload.get("instruction") or payload.get("brief"), 12_000)
     if not brief:
         return jsonify({"error": "请先输入你的 PPT 生成指令"}), 400
-    api_key = clean_text(payload.get("api_key")) or os.getenv("OPENAI_API_KEY", "").strip()
+    api_key = (
+        clean_text(payload.get("prompt_api_key"))
+        or clean_text(payload.get("api_key"))
+        or os.getenv("OPENAI_TEXT_API_KEY", "").strip()
+        or os.getenv("OPENAI_API_KEY", "").strip()
+    )
     if not api_key:
-        return jsonify({"error": "请输入 API Key，或设置 OPENAI_API_KEY 环境变量"}), 400
+        return jsonify({"error": "请输入 GPT 分析 API Key，或设置 OPENAI_TEXT_API_KEY / OPENAI_API_KEY 环境变量"}), 400
     try:
         slide_count = max(1, min(int(payload.get("slide_count") or 8), MAX_SLIDES))
         style = resolve_style(payload)
@@ -1418,9 +1600,14 @@ def design_prompts() -> Response:
         "OPENAI_TEXT_MODEL",
         "gpt-5.5",
     )
-    base_url = clean_text(payload.get("base_url"), 1000) or os.getenv(
-        "OPENAI_BASE_URL",
-        "https://api.openai.com/v1",
+    base_url = (
+        clean_text(payload.get("prompt_base_url"), 1000)
+        or clean_text(payload.get("base_url"), 1000)
+        or os.getenv("OPENAI_TEXT_BASE_URL", "").strip()
+        or os.getenv(
+            "OPENAI_BASE_URL",
+            "https://api.openai.com/v1",
+        )
     )
     deck_name = clean_text(payload.get("deck_name"), 200)
     global_prompt_addendum = clean_text(
@@ -1546,9 +1733,14 @@ SINGLES_DIR.mkdir(parents=True, exist_ok=True)
 
 def _resolve_api_and_deck(payload: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
     """Shared validation: returns (deck_context, api)."""
-    api_key = clean_text(payload.get("api_key")) or os.getenv("OPENAI_API_KEY", "").strip()
+    api_key = (
+        clean_text(payload.get("image_api_key"))
+        or clean_text(payload.get("api_key"))
+        or os.getenv("OPENAI_IMAGE_API_KEY", "").strip()
+        or os.getenv("OPENAI_API_KEY", "").strip()
+    )
     if not api_key:
-        raise ValueError("请输入 API Key，或设置 OPENAI_API_KEY 环境变量")
+        raise ValueError("请输入 Image 生成 API Key，或设置 OPENAI_IMAGE_API_KEY / OPENAI_API_KEY 环境变量")
     protocol = clean_text(payload.get("protocol"), 20) or "auto"
     if protocol not in {"auto", "images", "chat"}:
         raise ValueError("无效的 API 协议")
@@ -1575,8 +1767,12 @@ def _resolve_api_and_deck(payload: dict[str, Any]) -> tuple[dict[str, Any], dict
     }
     api = {
         "api_key": api_key,
-        "base_url": clean_text(payload.get("base_url"), 1000)
-        or os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1"),
+        "base_url": (
+            clean_text(payload.get("image_base_url"), 1000)
+            or clean_text(payload.get("base_url"), 1000)
+            or os.getenv("OPENAI_IMAGE_BASE_URL", "").strip()
+            or os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+        ),
         "model": clean_text(payload.get("model"), 200)
         or os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-2"),
         "size": clean_text(payload.get("size"), 50) or "2048x1152",
@@ -1622,6 +1818,119 @@ def _get_image_data_url(url_or_path: str) -> str:
             pass
 
     raise ValueError("无法解析已有图片地址，请确认图片已成功生成")
+
+
+@app.post("/api/export/existing")
+def export_existing() -> Response:
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"error": "请求内容必须是 JSON"}), 400
+
+    slides_raw = payload.get("slides")
+    if not isinstance(slides_raw, list):
+        return jsonify({"error": "页面数据格式无效"}), 400
+    if not slides_raw:
+        return jsonify({"error": "没有可导出的页面"}), 400
+
+    slides: list[dict[str, str]] = []
+    missing: list[int] = []
+    for index, raw in enumerate(slides_raw, start=1):
+        if not isinstance(raw, dict):
+            return jsonify({"error": f"第 {index} 页数据格式无效"}), 400
+        image_url = clean_text(raw.get("image_url"), MAX_REFERENCE_IMAGE_DATA_URL_LENGTH)
+        if not image_url:
+            missing.append(index)
+        slides.append(
+            {
+                "title": clean_text(raw.get("title"), 200) or f"第 {index} 页",
+                "prompt": clean_text(raw.get("prompt"), 20_000),
+                "image_url": image_url,
+            }
+        )
+    if missing:
+        return jsonify({"error": f"第 {', '.join(map(str, missing))} 页还没有生成图片，无法直接导出"}), 400
+
+    deck_name = clean_text(payload.get("deck_name"), 200) or "image2-ppt"
+    job_id = f"{time.strftime('%Y%m%d-%H%M%S')}-export-{uuid.uuid4().hex[:8]}"
+    job_dir = OUTPUT_ROOT / job_id
+    images_dir = job_dir / "images"
+    images_dir.mkdir(parents=True, exist_ok=True)
+
+    job = {
+        "id": job_id,
+        "status": "packing",
+        "message": "正在打包已有页面",
+        "total": len(slides),
+        "completed": 0,
+        "failed": 0,
+        "errors": [],
+        "slides": [
+            {"index": index, "status": "queued"}
+            for index in range(1, len(slides) + 1)
+        ],
+    }
+    with JOBS_LOCK:
+        JOBS[job_id] = job
+
+    try:
+        prompt_records: list[dict[str, Any]] = []
+        for index, slide in enumerate(slides, start=1):
+            data_url = _get_image_data_url(slide["image_url"])
+            image_bytes = image_data_url_to_png_bytes(data_url)
+            image_path = images_dir / f"slide-{index:02d}.png"
+            image_path.write_bytes(image_bytes)
+            public_image_url = f"/api/jobs/{job_id}/images/{image_path.name}"
+            prompt_records.append(
+                {
+                    "index": index,
+                    "title": slide["title"],
+                    "page_prompt": slide["prompt"],
+                    "source_image_url": slide["image_url"],
+                    "export_image_url": public_image_url,
+                }
+            )
+            with JOBS_LOCK:
+                JOBS[job_id]["completed"] += 1
+                JOBS[job_id]["slides"][index - 1] = {
+                    "index": index,
+                    "status": "completed",
+                    "image_url": public_image_url,
+                }
+
+        (job_dir / "prompts.json").write_text(
+            json.dumps(
+                {
+                    "deck_name": deck_name,
+                    "exported_from_existing_images": True,
+                    "slides": prompt_records,
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        exports = create_exports(job_dir, deck_name)
+    except Exception as exc:  # noqa: BLE001 - surface export errors in UI
+        message = f"已有页面导出失败: {exc}"
+        update_job(
+            job_id,
+            status="failed",
+            message=message,
+            errors=[message],
+        )
+        with JOBS_LOCK:
+            return jsonify(public_job(JOBS[job_id])), 502
+
+    update_job(
+        job_id,
+        status="completed",
+        message="已有页面已打包，可以下载 ZIP / PDF / PPTX",
+        download_url=f"/api/jobs/{job_id}/download",
+        downloads={key: f"/api/jobs/{job_id}/download/{key}" for key in exports},
+        export_files=exports,
+    )
+    with JOBS_LOCK:
+        return jsonify(public_job(JOBS[job_id]))
 
 
 @app.post("/api/generate/refine")

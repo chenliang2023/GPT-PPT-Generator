@@ -128,6 +128,31 @@ class ChatSuccessSession:
         raise AssertionError("URL download should not be used for Base64 responses")
 
 
+class ModelListSession:
+    endpoints = []
+    headers = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return None
+
+    def get(self, endpoint, **kwargs):
+        type(self).endpoints.append(endpoint)
+        type(self).headers.append(kwargs.get("headers", {}))
+        return TransientResponse(
+            200,
+            payload={
+                "data": [
+                    {"id": "gpt-5.5"},
+                    {"id": "gpt-image-2"},
+                    {"id": "gpt-5.5"},
+                ]
+            },
+        )
+
+
 def test_compose_prompt_contains_global_and_page_prompt() -> None:
     prompt = app.compose_prompt(
         "Minimal technology style",
@@ -208,6 +233,19 @@ def test_normalize_endpoint_supports_chat_protocol() -> None:
         app.normalize_endpoint("https://example.com/v1/images/generations", "chat")
         == "https://example.com/v1/chat/completions"
     )
+
+
+def test_request_model_list_normalizes_endpoint_and_deduplicates(monkeypatch) -> None:
+    ModelListSession.endpoints = []
+    ModelListSession.headers = []
+    monkeypatch.setattr(app.requests, "Session", ModelListSession)
+    models = app.request_model_list(
+        "https://example.com/v1/chat/completions",
+        "test-key",
+    )
+    assert models == ["gpt-5.5", "gpt-image-2"]
+    assert ModelListSession.endpoints == ["https://example.com/v1/models"]
+    assert ModelListSession.headers[0]["Authorization"] == "Bearer test-key"
 
 
 def test_request_image_translates_group_permission_error(monkeypatch) -> None:
@@ -312,6 +350,20 @@ def test_validate_payload_maps_style_preset_and_reference_images(monkeypatch) ->
     assert "Use English" in deck["language_instruction"]
     assert deck["slides"][0]["reference_images"] == [reference]
     assert api["protocol"] == "auto"
+
+
+def test_validate_payload_prefers_image_api_settings() -> None:
+    _deck, api = app.validate_payload(
+        {
+            "api_key": "legacy-key",
+            "base_url": "https://legacy.example",
+            "image_api_key": "image-key",
+            "image_base_url": "https://image.example",
+            "slides": [{"prompt": "Slide one", "reference_images": []}],
+        }
+    )
+    assert api["api_key"] == "image-key"
+    assert api["base_url"] == "https://image.example"
 
 
 def test_validate_payload_requires_custom_language_requirement() -> None:
@@ -484,6 +536,97 @@ def test_design_prompts_endpoint_returns_model_slides(monkeypatch) -> None:
     assert payload["slides"] == [{"title": "Cover", "prompt": "Create a polished cover."}]
 
 
+def test_design_prompts_endpoint_prefers_prompt_api_settings(monkeypatch) -> None:
+    captured = {}
+
+    def fake_request_chat_text_api(base_url, api_key, model, messages):
+        captured.update(
+            {
+                "base_url": base_url,
+                "api_key": api_key,
+                "model": model,
+                "messages": messages,
+            }
+        )
+        return json.dumps(
+            {
+                "deck_name": "Prompt Settings Deck",
+                "slides": [{"title": "Cover", "prompt": "Create a cover."}],
+            }
+        )
+
+    monkeypatch.setattr(app, "request_chat_text_api", fake_request_chat_text_api)
+    client = app.app.test_client()
+    response = client.post(
+        "/api/design/prompts",
+        json={
+            "api_key": "legacy-key",
+            "base_url": "https://legacy.example",
+            "prompt_api_key": "prompt-key",
+            "prompt_base_url": "https://prompt.example",
+            "instruction": "Create a product launch deck.",
+            "slide_count": 1,
+            "prompt_model": "gpt-5.5",
+        },
+    )
+    assert response.status_code == 200
+    assert captured["api_key"] == "prompt-key"
+    assert captured["base_url"] == "https://prompt.example"
+
+
+def test_api_settings_models_endpoint_prefers_prompt_settings(monkeypatch) -> None:
+    captured = {}
+
+    def fake_request_model_list(base_url, api_key):
+        captured["base_url"] = base_url
+        captured["api_key"] = api_key
+        return ["gpt-5.5", "gpt-4.1"]
+
+    monkeypatch.setattr(app, "request_model_list", fake_request_model_list)
+    client = app.app.test_client()
+    response = client.post(
+        "/api/settings/models",
+        json={
+            "target": "prompt",
+            "api_key": "legacy-key",
+            "base_url": "https://legacy.example",
+            "prompt_api_key": "prompt-key",
+            "prompt_base_url": "https://prompt.example",
+        },
+    )
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["models"] == ["gpt-5.5", "gpt-4.1"]
+    assert payload["target"] == "prompt"
+    assert captured == {
+        "base_url": "https://prompt.example",
+        "api_key": "prompt-key",
+    }
+
+
+def test_api_settings_test_endpoint_returns_model_count(monkeypatch) -> None:
+    monkeypatch.setattr(
+        app,
+        "request_model_list",
+        lambda _base_url, _api_key: ["gpt-image-2", "gpt-image-1"],
+    )
+    client = app.app.test_client()
+    response = client.post(
+        "/api/settings/test",
+        json={
+            "target": "image",
+            "image_api_key": "image-key",
+            "image_base_url": "https://image.example",
+        },
+    )
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["ok"] is True
+    assert payload["target"] == "image"
+    assert payload["model_count"] == 2
+    assert payload["models_preview"] == ["gpt-image-2", "gpt-image-1"]
+
+
 def test_reference_upload_accepts_image() -> None:
     client = app.app.test_client()
     response = client.post(
@@ -579,5 +722,38 @@ def test_generation_job_writes_export_files(tmp_path, monkeypatch) -> None:
             "slide-01.png",
             "slide-02.png",
         ]
+    presentation = Presentation(pptx_path)
+    assert len(presentation.slides) == 2
+
+
+def test_export_existing_images_writes_export_files(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(app, "OUTPUT_ROOT", tmp_path)
+    data_url = "data:image/png;base64," + base64.b64encode(PNG_BYTES).decode("ascii")
+    client = app.app.test_client()
+    response = client.post(
+        "/api/export/existing",
+        json={
+            "deck_name": "existing-deck",
+            "slides": [
+                {"title": "Cover", "prompt": "Cover prompt", "image_url": data_url},
+                {"title": "Agenda", "prompt": "Agenda prompt", "image_url": data_url},
+            ],
+        },
+    )
+    assert response.status_code == 200
+    payload = response.get_json()
+    job_id = payload["id"]
+    assert payload["status"] == "completed"
+    assert payload["completed"] == 2
+    assert payload["downloads"] == {
+        "zip": f"/api/jobs/{job_id}/download/zip",
+        "pdf": f"/api/jobs/{job_id}/download/pdf",
+        "pptx": f"/api/jobs/{job_id}/download/pptx",
+    }
+    assert (tmp_path / job_id / "images" / "slide-01.png").exists()
+    assert (tmp_path / job_id / "existing-deck-images.zip").exists()
+    assert (tmp_path / job_id / "existing-deck-images.pdf").exists()
+    pptx_path = tmp_path / job_id / "existing-deck-image-only.pptx"
+    assert pptx_path.exists()
     presentation = Presentation(pptx_path)
     assert len(presentation.slides) == 2
