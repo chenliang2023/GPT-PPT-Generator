@@ -315,6 +315,28 @@ def test_validate_payload_accepts_custom_language_requirement() -> None:
     assert deck["language_instruction"] == "Use bilingual English and Chinese text."
 
 
+def test_validate_payload_allows_concurrency_up_to_20() -> None:
+    _deck, api = app.validate_payload(
+        {
+            "api_key": "test-key",
+            "concurrency": 20,
+            "slides": [{"prompt": "Slide one", "reference_images": []}],
+        }
+    )
+    assert api["concurrency"] == 20
+
+
+def test_validate_payload_clamps_concurrency_above_20() -> None:
+    _deck, api = app.validate_payload(
+        {
+            "api_key": "test-key",
+            "concurrency": 99,
+            "slides": [{"prompt": "Slide one", "reference_images": []}],
+        }
+    )
+    assert api["concurrency"] == app.MAX_CONCURRENCY
+
+
 def test_health_endpoint() -> None:
     client = app.app.test_client()
     response = client.get("/health")

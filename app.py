@@ -20,6 +20,7 @@ from flask import Flask, Response, jsonify, request, send_file, send_from_direct
 ROOT = Path(__file__).resolve().parent
 OUTPUT_ROOT = ROOT / "outputs"
 MAX_SLIDES = 50
+MAX_CONCURRENCY = 20
 MAX_REFERENCE_IMAGES_PER_SLIDE = 3
 MAX_REFERENCE_IMAGE_DATA_URL_LENGTH = 12_000_000
 OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
@@ -609,7 +610,7 @@ def validate_payload(payload: dict[str, Any]) -> tuple[dict[str, Any], dict[str,
     if not api_key:
         raise ValueError("请输入 API Key，或设置 OPENAI_API_KEY 环境变量")
 
-    concurrency = max(1, min(int(payload.get("concurrency") or 2), 6))
+    concurrency = max(1, min(int(payload.get("concurrency") or 2), MAX_CONCURRENCY))
     protocol = clean_text(payload.get("protocol"), 20) or "auto"
     if protocol not in {"auto", "images", "chat"}:
         raise ValueError("无效的 API 协议")
@@ -868,9 +869,12 @@ INDEX_HTML = r"""<!doctype html>
           <select id="quality"><option value="high">high</option><option value="medium">medium</option><option value="low">low</option><option value="auto">auto</option></select>
         </label>
         <label>并发页数
-          <select id="concurrency"><option value="1">1</option><option value="2" selected>2</option><option value="3">3</option><option value="4">4</option><option value="5">5</option><option value="6">6</option></select>
+          <select id="concurrency"></select>
         </label>
       </div>
+      <p class="note">
+        中转站配置示例：Base URL 填 <code>http://216.234.142.96:3000</code> 或 <code>https://www.dreamfield.top</code>，不要手动加 <code>/v1/images/generations</code>；API Key 填中转站提供的 Key；模型填 <code>gpt-image-2</code>。协议建议选“自动”，如果中转站说明使用 <code>/v1/chat/completions</code> 出图，就选 “Chat Completions”。并发越高速度可能越快，但也更容易触发中转站限流，建议先从 2-5 开始。
+      </p>
     </section>
 
     <section class="section">
@@ -1023,6 +1027,18 @@ INDEX_HTML = r"""<!doctype html>
       const isCustom = document.getElementById("language").value === "custom";
       document.getElementById("customLanguageLabel").style.display = isCustom ? "grid" : "none";
     }
+
+    function populateConcurrencyOptions() {
+      const select = document.getElementById("concurrency");
+      select.innerHTML = "";
+      for (let value = 1; value <= 20; value += 1) {
+        const option = document.createElement("option");
+        option.value = String(value);
+        option.textContent = String(value);
+        if (value === 2) option.selected = true;
+        select.appendChild(option);
+      }
+    }
     function renderJob(job) {
       statusEl.classList.add("active");
       document.getElementById("statusMessage").textContent = job.message;
@@ -1091,6 +1107,7 @@ INDEX_HTML = r"""<!doctype html>
     document.getElementById("addSlide").addEventListener("click", () => addSlide());
     document.getElementById("language").addEventListener("change", updateLanguageRequirementVisibility);
     generateBtn.addEventListener("click", startGeneration);
+    populateConcurrencyOptions();
     addSlide({ prompt: "封面：生成式 AI 如何重塑内容生产。左侧使用醒目标题区域，右侧使用抽象智能网络与内容创作图形，保持大留白。" });
     addSlide({ prompt: "展示传统线性内容生产流程向实时智能共创循环转变，使用清晰的流程关系和现代信息图构图。" });
     updateLanguageRequirementVisibility();
