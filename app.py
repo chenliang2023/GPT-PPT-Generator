@@ -54,30 +54,6 @@ JOBS: dict[str, dict[str, Any]] = {}
 JOBS_LOCK = threading.Lock()
 
 STYLE_PRESETS = {
-    "modern-tech": {
-        "name": "现代科技",
-        "prompt": "Modern technology keynote style, deep navy background, teal and cyan accents, crisp information hierarchy, refined glow, spacious 16:9 composition.",
-    },
-    "minimal-business": {
-        "name": "极简商务",
-        "prompt": "Minimal premium business presentation, warm white background, charcoal typography, restrained accent color, generous whitespace, editorial 16:9 layout.",
-    },
-    "dark-luxury": {
-        "name": "深色高级",
-        "prompt": "Dark luxury presentation style, near-black background, subtle gold accents, elegant typography, cinematic lighting, premium restrained composition.",
-    },
-    "colorful-creative": {
-        "name": "多彩创意",
-        "prompt": "Colorful creative presentation style, bold geometric forms, energetic but controlled palette, playful visual rhythm, clear hierarchy, polished 16:9 layout.",
-    },
-    "data-report": {
-        "name": "数据报告",
-        "prompt": "Professional data report presentation, light neutral background, blue-green accents, precise chart-like visual language, structured grid, highly readable 16:9 layout.",
-    },
-    "chinese-red": {
-        "name": "中国红",
-        "prompt": "Contemporary Chinese red presentation style, rich red and warm ivory palette, modern editorial composition, subtle cultural visual cues, formal and polished 16:9 layout.",
-    },
     "paper-grain-editorial": {
         "name": "纸感蓝白信息秩序",
         "prompt": (
@@ -203,7 +179,7 @@ def public_styles() -> list[dict[str, Any]]:
 
 
 def resolve_style(payload: dict[str, Any]) -> dict[str, str]:
-    style_preset = clean_text(payload.get("style_preset"), 80) or "modern-tech"
+    style_preset = clean_text(payload.get("style_preset"), 80) or "paper-grain-editorial"
     custom_style = clean_text(payload.get("custom_style"), 4000)
     custom_style_name = clean_text(payload.get("custom_style_name"), 80)
 

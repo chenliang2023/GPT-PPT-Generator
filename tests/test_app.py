@@ -302,12 +302,12 @@ def test_validate_payload_maps_style_preset_and_reference_images(monkeypatch) ->
     deck, api = app.validate_payload(
         {
             "api_key": "test-key",
-            "style_preset": "minimal-business",
+            "style_preset": "paper-grain-editorial",
             "language": "en",
             "slides": [{"prompt": "Slide one", "reference_images": [reference]}],
         }
     )
-    assert deck["style_name"] == "极简商务"
+    assert deck["style_name"] == "纸感蓝白信息秩序"
     assert deck["language_name"] == "English"
     assert "Use English" in deck["language_instruction"]
     assert deck["slides"][0]["reference_images"] == [reference]
@@ -536,8 +536,8 @@ def test_generation_job_writes_export_files(tmp_path, monkeypatch) -> None:
         job_id,
         {
             "deck_name": "test-deck",
-            "style_preset": "modern-tech",
-            "style_name": "现代科技",
+            "style_preset": "paper-grain-editorial",
+            "style_name": "纸感蓝白信息秩序",
             "global_style": "Minimal",
             "language": "en",
             "language_name": "English",
