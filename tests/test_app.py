@@ -56,9 +56,84 @@ class TransientResponse:
         self.text = text
         self._payload = payload or {}
         self.ok = 200 <= status_code < 300
+        self.headers = {}
+        self.encoding = "utf-8"
 
     def json(self):
         return self._payload
+
+    @property
+    def content(self):
+        return self.text.encode("utf-8")
+
+    def close(self):
+        return None
+
+
+class StreamingJsonResponse:
+    status_code = 200
+    ok = True
+    headers = {}
+    encoding = "utf-8"
+
+    def __init__(self, chunks):
+        self.chunks = chunks
+        self.closed = False
+        self.json_called = False
+
+    def iter_content(self, chunk_size=8192):
+        for chunk in self.chunks:
+            yield chunk
+
+    def json(self):
+        self.json_called = True
+        raise AssertionError("streaming responses should be parsed from iter_content")
+
+    @property
+    def text(self):
+        return b"".join(self.chunks).decode("utf-8")
+
+    @property
+    def content(self):
+        return b"".join(self.chunks)
+
+    def close(self):
+        self.closed = True
+
+
+class StreamingJsonSession:
+    response = StreamingJsonResponse([
+        b'{"choices":[{"message":{"content":"',
+        b'{\\"slides\\":[\\"one\\"]}',
+        b'"}}]}',
+    ])
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return None
+
+    def post(self, *_args, **_kwargs):
+        return type(self).response
+
+
+class CaptureTimeoutSession:
+    timeout = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return None
+
+    def post(self, *_args, **kwargs):
+        type(self).timeout = kwargs.get("timeout")
+        encoded = base64.b64encode(b"ok").decode("ascii")
+        return TransientResponse(
+            200,
+            payload={"data": [{"b64_json": encoded}]},
+        )
 
 
 class TransientThenSuccessSession:
@@ -188,6 +263,19 @@ def test_extract_image_bytes_from_base64() -> None:
     assert app.extract_image_bytes(payload, FakeSession()) == expected
 
 
+def test_extract_image_bytes_from_output_result() -> None:
+    expected = b"image-output"
+    payload = {
+        "output": [
+            {
+                "type": "image_generation_call",
+                "result": base64.b64encode(expected).decode("ascii"),
+            }
+        ]
+    }
+    assert app.extract_image_bytes(payload, FakeSession()) == expected
+
+
 def test_extract_chat_image_bytes_from_data_url() -> None:
     expected = b"chat-image"
     encoded = base64.b64encode(expected).decode("ascii")
@@ -222,6 +310,51 @@ def test_extract_chat_image_bytes_from_message_images_url() -> None:
         app.extract_chat_image_bytes(payload, FakeDownloadSession())
         == b"downloaded-image"
     )
+
+
+def test_extract_chat_text_from_nested_content_parts() -> None:
+    payload = {
+        "choices": [
+            {
+                "message": {
+                    "content": [
+                        {"type": "text", "text": "first"},
+                        {"type": "text", "text": {"value": "second"}},
+                    ]
+                }
+            }
+        ]
+    }
+    assert app.extract_chat_text(payload, FakeSession()) == "first\nsecond"
+
+
+def test_extract_chat_text_from_output_text() -> None:
+    payload = {"choices": [{"message": {"output_text": "done"}}]}
+    assert app.extract_chat_text(payload, FakeSession()) == "done"
+
+
+def test_extract_chat_text_from_proxy_data_result() -> None:
+    payload = {"data": {"result": '{"slides": []}'}}
+    assert app.extract_chat_text(payload, FakeSession()) == '{"slides": []}'
+
+
+def test_request_with_retries_reads_streaming_json_early(monkeypatch) -> None:
+    StreamingJsonSession.response = StreamingJsonResponse([
+        b'{"choices":[{"message":{"content":"',
+        b'{\\"slides\\":[\\"one\\"]}',
+        b'"}}]}',
+    ])
+    monkeypatch.setattr(app.requests, "Session", StreamingJsonSession)
+    result = app.request_with_retries(
+        "https://example.com/v1/chat/completions",
+        {"Authorization": "Bearer test"},
+        [{"model": "test", "messages": []}],
+        app.extract_chat_text,
+        error_translator=app.translate_text_api_error,
+    )
+    assert result == '{"slides":["one"]}'
+    assert StreamingJsonSession.response.closed is True
+    assert StreamingJsonSession.response.json_called is False
 
 
 def test_normalize_endpoint_supports_chat_protocol() -> None:
@@ -275,6 +408,22 @@ def test_request_image_retries_transient_errors(monkeypatch) -> None:
     )
     assert result == b"ok"
     assert TransientThenSuccessSession.calls == 3
+
+
+def test_request_image_uses_long_read_timeout(monkeypatch) -> None:
+    CaptureTimeoutSession.timeout = None
+    monkeypatch.setattr(app.requests, "Session", CaptureTimeoutSession)
+    result = app.request_image(
+        "https://example.com/v1/images/generations",
+        "test-key",
+        "gpt-image-2",
+        "test prompt",
+        "1024x1024",
+        "low",
+        protocol="images",
+    )
+    assert result == b"ok"
+    assert CaptureTimeoutSession.timeout == (30, 600)
 
 
 def test_request_image_translates_upstream_failure(monkeypatch) -> None:
@@ -478,6 +627,16 @@ def test_validate_payload_clamps_concurrency_above_20() -> None:
     assert api["concurrency"] == app.MAX_CONCURRENCY
 
 
+def test_validate_payload_defaults_to_single_image_concurrency() -> None:
+    _deck, api = app.validate_payload(
+        {
+            "api_key": "test-key",
+            "slides": [{"prompt": "Slide one", "reference_images": []}],
+        }
+    )
+    assert api["concurrency"] == 1
+
+
 def test_health_endpoint() -> None:
     client = app.app.test_client()
     response = client.get("/health")
@@ -641,6 +800,40 @@ def test_reference_upload_accepts_image() -> None:
     assert payload["items"][0]["name"] == "reference.png"
     assert payload["items"][0]["image_count"] == 1
     assert payload["reference_images"][0].startswith("data:image/")
+
+
+def test_reference_upload_extracts_pdf_text_instead_of_raw_file(monkeypatch) -> None:
+    monkeypatch.setattr(
+        app,
+        "check_model_capabilities",
+        lambda *_args, **_kwargs: {"supports_files": True, "max_file_size": 25_000_000},
+    )
+    monkeypatch.setattr(
+        app,
+        "extract_pdf_text_reference",
+        lambda name, _data, max_pages=app.MAX_PDF_TEXT_PAGES: (
+            f"{name}: PDF reference, 2 pages. Extracted text: Important content",
+            "Page 1:\nImportant content",
+            [],
+            2,
+        ),
+    )
+    client = app.app.test_client()
+    response = client.post(
+        "/api/references",
+        data={
+            "files": (io.BytesIO(b"%PDF-1.4 fake"), "reference.pdf"),
+        },
+        content_type="multipart/form-data",
+    )
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["items"][0]["file_type"] == "pdf"
+    assert payload["items"][0]["has_raw_file"] is False
+    assert payload["items"][0]["image_count"] == 0
+    assert payload["raw_files"] == []
+    assert payload["reference_images"] == []
+    assert "Important content" in payload["reference_context"]
 
 
 def test_generate_requires_key(monkeypatch) -> None:

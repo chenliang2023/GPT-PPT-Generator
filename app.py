@@ -43,6 +43,8 @@ OUTPUT_ROOT = ROOT / "outputs"
 STYLE_LIBRARY_PATH = ROOT / "style-library.json"
 MAX_SLIDES = 50
 MAX_CONCURRENCY = 20
+DEFAULT_IMAGE_CONCURRENCY = 1
+IMAGE_PAGE_RETRY_ATTEMPTS = 3
 MAX_REFERENCE_IMAGES_PER_SLIDE = 3
 MAX_GLOBAL_REFERENCE_IMAGES = 6
 MAX_TOTAL_REFERENCE_IMAGES_PER_SLIDE = 8
@@ -51,6 +53,7 @@ MAX_REFERENCE_UPLOADS = 12
 MAX_REFERENCE_FILE_BYTES = 25_000_000
 MAX_REFERENCE_CONTEXT_LENGTH = 12_000
 MAX_CUSTOM_STYLES = 100
+MAX_PDF_TEXT_PAGES = 80
 DEFAULT_SLIDE_WIDTH_INCHES = 16
 DEFAULT_SLIDE_HEIGHT_INCHES = 9
 OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
@@ -388,33 +391,77 @@ when possible. Do not invent brands, logos, watermarks, or signatures.
     return prompt
 
 
-def extract_image_bytes(payload: dict[str, Any], session: requests.Session) -> bytes:
-    data = payload.get("data")
-    if not isinstance(data, list) or not data or not isinstance(data[0], dict):
-        raise RuntimeError("图片 API 返回结果中没有可识别的 data")
+def iter_image_candidates(value: Any):
+    if isinstance(value, list):
+        for item in value:
+            yield from iter_image_candidates(item)
+        return
+    if not isinstance(value, dict):
+        return
 
-    item = data[0]
+    yield value
+    for key in (
+        "data",
+        "output",
+        "choices",
+        "message",
+        "content",
+        "images",
+        "image",
+        "image_url",
+        "source",
+        "result",
+    ):
+        nested = value.get(key)
+        if isinstance(nested, (dict, list)):
+            yield from iter_image_candidates(nested)
+
+
+def image_bytes_from_candidate(
+    item: Any,
+    session: requests.Session,
+    allow_plain_base64: bool = True,
+) -> bytes | None:
+    if isinstance(item, str):
+        return image_bytes_from_string(item, session, allow_plain_base64)
+    if not isinstance(item, dict):
+        return None
+
     encoded = (
         item.get("b64_json")
         or item.get("image_base64")
         or item.get("base64")
         or item.get("image")
+        or item.get("result")
+        or item.get("data")
     )
     if isinstance(encoded, str) and encoded:
-        if encoded.startswith("data:") and "," in encoded:
-            encoded = encoded.split(",", 1)[1]
-        try:
-            return base64.b64decode(encoded)
-        except (ValueError, binascii.Error) as exc:
-            raise RuntimeError("图片 API 返回的 Base64 数据无效") from exc
+        result = image_bytes_from_string(encoded, session, allow_plain_base64)
+        if result:
+            return result
 
-    image_url = item.get("url")
+    image_url = item.get("url") or item.get("file_url")
+    if not image_url:
+        image_url = item.get("image_url")
+    if isinstance(image_url, dict):
+        image_url = image_url.get("url")
     if isinstance(image_url, str) and image_url:
-        response = session.get(image_url, timeout=300)
-        response.raise_for_status()
-        return response.content
+        return image_bytes_from_string(image_url, session, False)
 
-    raise RuntimeError("图片 API 结果中没有 b64_json 或 url")
+    text_content = item.get("text") or item.get("content")
+    if isinstance(text_content, str):
+        return image_bytes_from_string(text_content, session, False)
+
+    return None
+
+
+def extract_image_bytes(payload: dict[str, Any], session: requests.Session) -> bytes:
+    for candidate in iter_image_candidates(payload):
+        result = image_bytes_from_candidate(candidate, session, True)
+        if result:
+            return result
+
+    raise RuntimeError("图片 API 结果中没有找到图片 Base64 或 URL")
 
 
 def image_data_url_to_png_bytes(value: str) -> bytes:
@@ -476,11 +523,10 @@ def extract_chat_image_bytes(
     payload: dict[str, Any],
     session: requests.Session,
 ) -> bytes:
-    if isinstance(payload.get("data"), list):
-        try:
-            return extract_image_bytes(payload, session)
-        except RuntimeError:
-            pass
+    try:
+        return extract_image_bytes(payload, session)
+    except RuntimeError:
+        pass
 
     choices = payload.get("choices")
     if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
@@ -527,29 +573,104 @@ def extract_chat_image_bytes(
     raise RuntimeError("Chat Completions 响应中没有找到图片 Base64 或 URL")
 
 
-def extract_chat_text(payload: dict[str, Any], _session: requests.Session) -> str:
-    choices = payload.get("choices")
-    if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
-        raise RuntimeError("Chat Completions 返回结果中没有可识别的 choices")
-    message = choices[0].get("message")
-    if not isinstance(message, dict):
-        raise RuntimeError("Chat Completions 返回结果中没有可识别的 message")
-
-    content = message.get("content")
-    if isinstance(content, str):
-        text = content.strip()
-        if text:
-            return text
-    if isinstance(content, list):
+def collect_text_parts(value: Any) -> list[str]:
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list):
         parts: list[str] = []
-        for item in content:
-            if isinstance(item, str):
-                parts.append(item)
-            elif isinstance(item, dict) and isinstance(item.get("text"), str):
-                parts.append(item["text"])
-        text = "\n".join(part.strip() for part in parts if part.strip()).strip()
+        for item in value:
+            parts.extend(collect_text_parts(item))
+        return parts
+    if not isinstance(value, dict):
+        return []
+
+    parts: list[str] = []
+    for key in ("text", "output_text", "content"):
+        nested = value.get(key)
+        if isinstance(nested, dict) and isinstance(nested.get("value"), str):
+            parts.append(nested["value"])
+            continue
+        parts.extend(collect_text_parts(nested))
+    if not parts and isinstance(value.get("value"), str):
+        parts.append(value["value"])
+    return parts
+
+
+def clean_joined_text(value: Any) -> str:
+    return "\n".join(
+        part.strip()
+        for part in collect_text_parts(value)
+        if part and part.strip()
+    ).strip()
+
+
+def extract_chat_text(payload: dict[str, Any], _session: requests.Session) -> str:
+    candidates: list[Any] = []
+
+    choices = payload.get("choices")
+    if isinstance(choices, list):
+        for choice in choices:
+            if not isinstance(choice, dict):
+                continue
+            message = choice.get("message")
+            if isinstance(message, dict):
+                candidates.extend(
+                    [
+                        message.get("content"),
+                        message.get("text"),
+                        message.get("output_text"),
+                    ]
+                )
+            delta = choice.get("delta")
+            if isinstance(delta, dict):
+                candidates.append(delta.get("content"))
+            candidates.extend(
+                [
+                    choice.get("content"),
+                    choice.get("text"),
+                    choice.get("output_text"),
+                ]
+            )
+
+    output = payload.get("output")
+    if isinstance(output, list):
+        for item in output:
+            if isinstance(item, dict):
+                candidates.extend(
+                    [item.get("content"), item.get("text"), item.get("output_text")]
+                )
+            else:
+                candidates.append(item)
+
+    data = payload.get("data")
+    if isinstance(data, dict):
+        candidates.extend(
+            [
+                data.get("content"),
+                data.get("text"),
+                data.get("output_text"),
+                data.get("result"),
+                data.get("response"),
+            ]
+        )
+    elif isinstance(data, list):
+        candidates.append(data)
+
+    candidates.extend(
+        [
+            payload.get("content"),
+            payload.get("text"),
+            payload.get("output_text"),
+            payload.get("result"),
+            payload.get("response"),
+        ]
+    )
+
+    for candidate in candidates:
+        text = clean_joined_text(candidate)
         if text:
             return text
+
     raise RuntimeError("Chat Completions 响应中没有找到文本内容")
 
 
@@ -569,6 +690,92 @@ def translate_api_error(last_response: requests.Response) -> RuntimeError:
 def translate_text_api_error(last_response: requests.Response) -> RuntimeError:
     detail = last_response.text[:1500]
     return RuntimeError(f"文本模型请求失败 ({last_response.status_code}): {detail}")
+
+
+def parse_json_from_partial_text(text: str) -> Any | None:
+    text = text.lstrip("\ufeff")
+    stripped = text.strip()
+    if not stripped:
+        return None
+
+    if stripped.startswith("data:"):
+        data_lines: list[str] = []
+        for line in stripped.splitlines():
+            line = line.strip()
+            if not line.startswith("data:"):
+                continue
+            value = line[5:].strip()
+            if value and value != "[DONE]":
+                data_lines.append(value)
+        if data_lines:
+            try:
+                return json.loads("\n".join(data_lines))
+            except json.JSONDecodeError:
+                pass
+
+    decoder = json.JSONDecoder()
+    for start, char in enumerate(text):
+        if char not in "[{":
+            continue
+        try:
+            data, end = decoder.raw_decode(text[start:])
+        except json.JSONDecodeError:
+            continue
+        trailing = text[start + end :].strip()
+        if not trailing:
+            return data
+    return None
+
+
+def read_response_json_early(response: requests.Response) -> tuple[Any, bytes]:
+    chunks: list[bytes] = []
+    total = 0
+
+    if not hasattr(response, "iter_content"):
+        fallback_content = getattr(response, "content", None)
+        payload = response.json()
+        raw = fallback_content if isinstance(fallback_content, bytes) else b""
+        return payload, raw
+
+    for chunk in response.iter_content(chunk_size=65536):
+        if not chunk:
+            continue
+        chunks.append(chunk)
+        total += len(chunk)
+        raw = b"".join(chunks)
+        text = raw.decode(response.encoding or "utf-8", errors="replace")
+        parsed = parse_json_from_partial_text(text)
+        if parsed is not None:
+            print(f"[DEBUG]   ✓ Parsed complete JSON before connection closed ({total:,} bytes)")
+            response.close()
+            return parsed, raw
+
+    raw = b"".join(chunks)
+    text = raw.decode(response.encoding or "utf-8", errors="replace")
+    parsed = parse_json_from_partial_text(text)
+    if parsed is not None:
+        return parsed, raw
+    raise RuntimeError(f"API 响应不是有效 JSON: {text[:1500]}")
+
+
+def read_response_bytes(response: requests.Response) -> bytes:
+    if not hasattr(response, "iter_content"):
+        content = getattr(response, "content", b"")
+        return content if isinstance(content, bytes) else bytes(content)
+
+    chunks: list[bytes] = []
+    expected = response.headers.get("content-length")
+    expected_length = int(expected) if expected and expected.isdigit() else None
+    total = 0
+    for chunk in response.iter_content(chunk_size=65536):
+        if not chunk:
+            continue
+        chunks.append(chunk)
+        total += len(chunk)
+        if expected_length is not None and total >= expected_length:
+            response.close()
+            break
+    return b"".join(chunks)
 
 
 def detect_provider_from_base_url(base_url: str) -> str:
@@ -747,45 +954,117 @@ def request_with_retries(
     payloads: list[dict[str, Any]],
     extractor,
     error_translator=translate_api_error,
+    read_timeout: int = 600,
+    attempts: int = 3,
 ) -> Any:
     transient_statuses = {429, 500, 502, 503, 504}
+    request_headers = {
+        **headers,
+        "Accept": headers.get("Accept", "application/json"),
+        "Connection": "close",
+    }
 
-    with requests.Session() as session:
-        last_response: requests.Response | None = None
-        last_exception: requests.RequestException | None = None
-        for attempt in range(3):
-            should_retry = False
-            for payload in payloads:
+    print(f"[DEBUG] request_with_retries: Starting request to {endpoint}")
+    print(f"[DEBUG] Payloads count: {len(payloads)}")
+
+    last_response: requests.Response | None = None
+    last_exception: requests.RequestException | None = None
+    for attempt in range(attempts):
+        print(f"[DEBUG] Attempt {attempt + 1}/{attempts}")
+        should_retry = False
+        for payload_idx, payload in enumerate(payloads):
+            with requests.Session() as session:
+                # 计算payload大小
+                import json
+                payload_json = json.dumps(payload)
+                payload_size = len(payload_json)
+                print(f"[DEBUG]   Trying payload {payload_idx + 1}/{len(payloads)}... (size: {payload_size:,} bytes = {payload_size/1024/1024:.2f} MB)")
+
+                if payload_size > 10 * 1024 * 1024:  # 大于10MB
+                    print(f"[WARNING] Payload is very large! May cause timeout or rejection.")
+
                 try:
+                    print(f"[DEBUG]   Sending request... (this may take a while)")
+                    import time as time_module
+                    start_time = time_module.time()
+                    response_bytes = b""
+
                     response = session.post(
                         endpoint,
-                        headers=headers,
+                        headers=request_headers,
                         json=payload,
-                        timeout=600,
+                        timeout=(30, read_timeout),
                         verify=False,  # 跳过SSL证书验证
+                        stream=True,
                     )
+
+                    elapsed = time_module.time() - start_time
+                    content_length = response.headers.get("content-length", "unknown")
+                    print(f"[DEBUG]   Response headers received after {elapsed:.2f}s: status={response.status_code}, content-length={content_length}")
+
+                except requests.Timeout as exc:
+                    print(f"[ERROR]   ✗ Request TIMEOUT while waiting for API response!")
+                    print(f"[ERROR]   This usually means:")
+                    print(f"[ERROR]   - Payload too large ({payload_size/1024/1024:.2f} MB)")
+                    print(f"[ERROR]   - API server processing too slow or did not flush a response within {read_timeout}s")
+                    print(f"[ERROR]   Suggestion: Reduce PDF pages or image quality")
+                    last_exception = exc
+                    should_retry = True
+                    break
                 except requests.RequestException as exc:
+                    print(f"[ERROR]   ✗ Request exception: {exc}")
                     last_exception = exc
                     should_retry = True
                     break
                 last_response = response
                 if response.ok:
-                    return extractor(response.json(), session)
+                    print(f"[DEBUG]   ✓ Success! Extracting data...")
+                    try:
+                        content_type = response.headers.get("content-type", "")
+                        if content_type.lower().startswith("image/"):
+                            response_bytes = read_response_bytes(response)
+                            print(f"[DEBUG]   ✓ Received direct image response: {len(response_bytes):,} bytes")
+                            return response_bytes
+                        try:
+                            response_payload, response_bytes = read_response_json_early(response)
+                        except RuntimeError as exc:
+                            print(f"[ERROR]   ✗ {exc}")
+                            raise
+                        result = extractor(response_payload, session)
+                        print(f"[DEBUG]   ✓ Data extracted successfully")
+                        return result
+                    except Exception as e:
+                        print(f"[ERROR]   ✗ Extraction failed: {e}")
+                        preview = ""
+                        if "response_bytes" in locals():
+                            preview = response_bytes[:1500].decode(
+                                response.encoding or "utf-8",
+                                errors="replace",
+                            )
+                        print(f"[ERROR]   Response preview: {preview}")
+                        raise
                 if response.status_code in transient_statuses:
+                    print(f"[DEBUG]   Transient error {response.status_code}, will retry")
                     should_retry = True
                     break
                 if response.status_code not in {400, 404, 422}:
+                    print(f"[DEBUG]   Non-retryable error {response.status_code}")
                     break
-            if should_retry and attempt < 2:
-                time.sleep(2**attempt)
-                continue
-            if not should_retry or attempt == 2:
-                break
+                print(f"[DEBUG]   Client error {response.status_code}, trying next payload")
+        if should_retry and attempt < attempts - 1:
+            wait_time = min(20, 2**attempt)
+            print(f"[DEBUG] Waiting {wait_time}s before retry...")
+            time.sleep(wait_time)
+            continue
+        if not should_retry or attempt == attempts - 1:
+            break
 
-        if last_response is None and last_exception is not None:
-            raise RuntimeError(f"API 连接失败: {last_exception}") from last_exception
-        assert last_response is not None
-        raise error_translator(last_response)
+    if last_response is None and last_exception is not None:
+        print(f"[ERROR] ✗ All attempts failed with exception")
+        raise RuntimeError(f"API 连接失败: {last_exception}") from last_exception
+    assert last_response is not None
+    print(f"[ERROR] ✗ All attempts failed, raising error")
+    raise error_translator(last_response)
 
 
 def request_images_api(
@@ -813,7 +1092,13 @@ def request_images_api(
         {**base_payload, "response_format": "b64_json"},
         base_payload,
     ]
-    return request_with_retries(endpoint, headers, payloads, extract_image_bytes)
+    return request_with_retries(
+        endpoint,
+        headers,
+        payloads,
+        extract_image_bytes,
+        attempts=5,
+    )
 
 
 def request_chat_api(
@@ -857,7 +1142,13 @@ def request_chat_api(
             "quality": quality,
         },
     ]
-    return request_with_retries(endpoint, headers, payloads, extract_chat_image_bytes)
+    return request_with_retries(
+        endpoint,
+        headers,
+        payloads,
+        extract_chat_image_bytes,
+        attempts=5,
+    )
 
 
 def request_chat_text_api(
@@ -876,6 +1167,27 @@ def request_chat_text_api(
         "messages": messages,
         "temperature": 0.35,
     }
+
+    # 调试：打印消息结构（不打印完整数据）
+    print(f"[DEBUG] Sending to API: {endpoint}")
+    print(f"[DEBUG] Model: {model}")
+    print(f"[DEBUG] Message structure:")
+    for i, msg in enumerate(messages):
+        content = msg.get("content")
+        if isinstance(content, list):
+            print(f"  Message[{i}] ({msg.get('role')}): {len(content)} parts")
+            for j, part in enumerate(content):
+                part_type = part.get("type")
+                if part_type == "text":
+                    print(f"    [{j}] type=text, len={len(part.get('text', ''))}")
+                elif part_type == "file":
+                    file_info = part.get("file", {})
+                    print(f"    [{j}] type=file, filename={file_info.get('filename')}, mime={file_info.get('mime_type')}, data_len={len(file_info.get('data', ''))}")
+                elif part_type == "image_url":
+                    print(f"    [{j}] type=image_url")
+        else:
+            print(f"  Message[{i}] ({msg.get('role')}): text, len={len(content) if content else 0}")
+
     payloads = [
         {**base_payload, "response_format": {"type": "json_object"}},
         base_payload,
@@ -886,6 +1198,7 @@ def request_chat_text_api(
         payloads,
         extract_chat_text,
         error_translator=translate_text_api_error,
+        read_timeout=240,
     )
 
 
@@ -1095,42 +1408,166 @@ def build_multimodal_content(
     """
     构建支持文件上传的多模态消息内容
 
-    优先使用原始文件，降级使用提取的图片
+    PDF 会被提取为文字，避免把大量页面图片塞进中转站请求体。
     """
     reference_files = reference_files or []
     reference_images = reference_images or []
 
+    # 调试日志
+    print(f"\n{'='*60}")
+    print(f"[DEBUG] build_multimodal_content called:")
+    print(f"  - text length: {len(text)} chars")
+    print(f"  - reference_files count: {len(reference_files)}")
+    print(f"  - reference_images count: {len(reference_images)}")
+
+    if reference_files:
+        for i, f in enumerate(reference_files):
+            print(f"  - file[{i}]: name={f.get('name')}, mime={f.get('mime_type')}, data_len={len(f.get('data', ''))} bytes")
+    print(f"{'='*60}\n")
+
     # 如果没有文件和图片，返回纯文本
     if not reference_files and not reference_images:
+        print(f"[DEBUG] ➜ No files or images, returning plain text\n")
         return text
 
     # 构建多模态内容
     content: list[dict[str, Any]] = [{"type": "text", "text": text}]
+    added_file_text = False
 
-    # 策略A：如果有原始文件，使用NewAPI的file格式
+    # 策略A：如果有原始文件，优先提取文本
     if reference_files:
-        for file in reference_files:
+        print(f"[DEBUG] ➜ Processing reference_files...")
+        for idx, file in enumerate(reference_files):
             if file.get("data") and file.get("mime_type"):
-                content.append({
-                    "type": "file",  # NewAPI格式
-                    "file": {
-                        "data": file["data"],
-                        "filename": file.get("name", "document.pdf"),
-                        "mime_type": file["mime_type"],
-                    }
-                })
-        return content
+                mime_type = file["mime_type"]
+                file_name = file.get("name", "document")
+
+                # PDF文件：提取文字，不再转图片
+                if mime_type == "application/pdf":
+                    try:
+                        print(f"\n[DEBUG] [{idx}] Extracting PDF text: {file_name}")
+                        print(f"[DEBUG]     Original size: {len(file['data'])} bytes (base64)")
+
+                        # 将base64解码为bytes
+                        file_bytes = base64.b64decode(file["data"])
+                        print(f"[DEBUG]     Decoded size: {len(file_bytes)} bytes (binary)")
+
+                        summary, pdf_text, warnings, _page_count = extract_pdf_text_reference(
+                            file_name,
+                            file_bytes,
+                        )
+                        if pdf_text:
+                            content[0]["text"] += (
+                                "\n\nUploaded PDF extracted text:\n"
+                                f"{text_preview(pdf_text, MAX_REFERENCE_CONTEXT_LENGTH)}"
+                            )
+                            added_file_text = True
+                            print(f"[DEBUG]     ✓ Extracted PDF text: {len(pdf_text)} chars")
+                        else:
+                            print(f"[WARNING]     No PDF text extracted: {summary}")
+                        for warning in warnings:
+                            print(f"[WARNING]     {warning}")
+                    except Exception as exc:
+                        # 转换失败，跳过这个文件
+                        print(f"[ERROR] ✗ PDF text extraction failed for {file_name}: {exc}")
+                        import traceback
+                        traceback.print_exc()
+                        continue
+                else:
+                    print(f"[DEBUG] [{idx}] Unsupported file type: {mime_type}, skipping")
+
+        if added_file_text:
+            print(f"\n[DEBUG] ➜ Returning text with extracted file content")
+            return content[0]["text"]
+        if len(content) > 1:  # 有成功添加的图片内容
+            print(f"\n[DEBUG] ➜ Total content items: {len(content)} (1 text + {len(content)-1} images)")
+            return content
+        else:
+            print(f"[DEBUG] ➜ No content added from files, falling back\n")
 
     # 策略B：降级使用提取的图片
     if reference_images:
+        print(f"[DEBUG] ➜ Using reference_images (fallback): {len(reference_images)} images")
         for image_url in reference_images:
             content.append({
                 "type": "image_url",
                 "image_url": {"url": image_url}
             })
+        print(f"[DEBUG] ➜ Total content items: {len(content)}\n")
         return content
 
+    print(f"[DEBUG] ➜ Returning plain text\n")
     return text
+
+
+def convert_pdf_to_images(pdf_bytes: bytes, max_pages: int | None = None) -> list[str]:
+    """
+    将PDF转换为图片列表（base64编码的data URLs）
+
+    Args:
+        pdf_bytes: PDF文件的二进制数据
+        max_pages: 最多转换几页，None表示转换全部
+
+    Returns:
+        图片的data URL列表
+    """
+    import time
+    start_time = time.time()
+
+    try:
+        import fitz  # PyMuPDF
+    except ImportError:
+        raise RuntimeError("需要安装 PyMuPDF: pip install pymupdf")
+
+    images = []
+    try:
+        print(f"[DEBUG]     Opening PDF document...")
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        total_pages = len(doc)
+        page_count = total_pages if max_pages is None else min(total_pages, max_pages)
+
+        print(f"[DEBUG]     ✓ PDF opened successfully")
+        print(f"[DEBUG]     Total pages: {total_pages}")
+        print(f"[DEBUG]     Converting: {'all pages' if max_pages is None else f'first {page_count} pages'}")
+        print(f"[DEBUG]     Matrix scale: 2x (high quality)")
+        print(f"[DEBUG]")
+
+        for page_num in range(page_count):
+            page_start = time.time()
+
+            page = doc[page_num]
+            # 渲染为图片（2倍缩放以提高质量）
+            pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
+            img_bytes = pix.tobytes("png")
+
+            # 转为data URL
+            img_base64 = base64.b64encode(img_bytes).decode()
+            data_url = f"data:image/png;base64,{img_base64}"
+            images.append(data_url)
+
+            page_time = time.time() - page_start
+            print(f"[DEBUG]     Page {page_num + 1}/{page_count}: {len(img_bytes):,} bytes, {page_time:.2f}s")
+
+        doc.close()
+
+        total_time = time.time() - start_time
+        total_size = sum(len(img.split(',')[1]) for img in images)  # base64 size
+        avg_time = total_time / len(images) if images else 0
+
+        print(f"[DEBUG]")
+        print(f"[DEBUG]     ✓ Conversion complete!")
+        print(f"[DEBUG]     Total images: {len(images)}")
+        print(f"[DEBUG]     Total size: {total_size:,} bytes (base64)")
+        print(f"[DEBUG]     Total time: {total_time:.2f}s")
+        print(f"[DEBUG]     Average time per page: {avg_time:.2f}s")
+
+    except Exception as exc:
+        print(f"[ERROR]     ✗ PDF conversion failed: {exc}")
+        import traceback
+        traceback.print_exc()
+        raise RuntimeError(f"PDF转图片失败: {exc}")
+
+    return images
 
 
 def image_data_url_from_bytes(data: bytes, fallback_mime: str = "image/png") -> tuple[str, str]:
@@ -1153,6 +1590,58 @@ def image_data_url_from_bytes(data: bytes, fallback_mime: str = "image/png") -> 
 def text_preview(value: str, limit: int = 2200) -> str:
     value = re.sub(r"\s+", " ", value).strip()
     return value[:limit]
+
+
+def extract_pdf_text_reference(
+    name: str,
+    data: bytes,
+    max_pages: int = MAX_PDF_TEXT_PAGES,
+) -> tuple[str, str, list[str], int]:
+    warnings: list[str] = []
+    text_parts: list[str] = []
+    page_count = 0
+
+    if fitz is not None:
+        try:
+            doc = fitz.open(stream=data, filetype="pdf")
+            page_count = len(doc)
+            pages_to_read = min(page_count, max_pages)
+            for page_index in range(pages_to_read):
+                text = doc[page_index].get_text("text").strip()
+                if text:
+                    text_parts.append(f"Page {page_index + 1}:\n{text}")
+            doc.close()
+        except Exception as exc:  # noqa: BLE001
+            warnings.append(f"{name}: PDF 文本提取失败：{exc}")
+    elif PdfReader is not None:
+        try:
+            reader = PdfReader(io.BytesIO(data))
+            page_count = len(reader.pages)
+            pages_to_read = min(page_count, max_pages)
+            for page_index, page in enumerate(reader.pages[:pages_to_read]):
+                text = (page.extract_text() or "").strip()
+                if text:
+                    text_parts.append(f"Page {page_index + 1}:\n{text}")
+        except Exception as exc:  # noqa: BLE001
+            warnings.append(f"{name}: PDF 文本提取失败：{exc}")
+    else:
+        warnings.append(f"{name}: 未安装 PDF 解析依赖，无法提取文字")
+
+    if not text_parts:
+        warnings.append(f"{name}: 没有提取到可用文字，可能是扫描版 PDF")
+
+    header = f"{name}: PDF reference"
+    if page_count:
+        header += f", {page_count} pages"
+    if page_count > max_pages:
+        header += f", first {max_pages} pages extracted"
+        warnings.append(f"{name}: PDF 共 {page_count} 页，仅提取前 {max_pages} 页文字")
+
+    text = "\n\n".join(text_parts)
+    summary = header
+    if text:
+        summary += ". Extracted text: " + text_preview(text, 3000)
+    return summary, text, warnings, page_count
 
 
 def process_pdf_reference(
@@ -1308,29 +1797,23 @@ def process_reference_file_v2(
             summary=f"{name}: 图片参考，{size}",
         )
 
-    # PDF文件：根据模型能力选择策略
+    # PDF文件：始终提取文字，避免把整份 PDF 转成大量图片发给中转站。
     if suffix == ".pdf" or content_type == "application/pdf":
-        if model_supports_files:
-            # 策略A：保留原始PDF，不提取
-            return ReferenceFile(
-                name=name,
-                file_type="pdf",
-                raw_data=data,
-                mime_type="application/pdf",
-                file_size=file_size,
-                summary=f"{name}: PDF文件（完整文件，AI直接分析）",
+        summary, text, warnings, page_count = extract_pdf_text_reference(name, data)
+        warning_text = "；".join(warnings)
+        return ReferenceFile(
+            name=name,
+            file_type="pdf",
+            text_content=text[:MAX_REFERENCE_CONTEXT_LENGTH],
+            extracted_images=[],
+            file_size=file_size,
+            summary=(
+                f"{name}: PDF文件，{page_count or '未知'}页，已提取文字"
+                + (f"（{warning_text}）" if warning_text else "")
             )
-        else:
-            # 策略B：提取内容（降级，仅用于不支持文件的模型）
-            text, images, warnings = process_pdf_reference(name, data, image_slots=6)
-            return ReferenceFile(
-                name=name,
-                file_type="pdf",
-                text_content=text,
-                extracted_images=images,
-                file_size=file_size,
-                summary=f"{name}: PDF文件（模型不支持文件，已提取文字和{len(images)}张图片）",
-            )
+            if text
+            else summary,
+        )
 
     # PPTX文件：类似处理
     if suffix == ".pptx":
@@ -1393,6 +1876,28 @@ def update_job(job_id: str, **changes: Any) -> None:
     with JOBS_LOCK:
         if job_id in JOBS:
             JOBS[job_id].update(changes)
+
+
+def likely_transient_image_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return any(
+        marker in text
+        for marker in (
+            "ssleoferror",
+            "unexpected_eof",
+            "eof occurred",
+            "connection aborted",
+            "connection reset",
+            "remote end closed",
+            "max retries exceeded",
+            "read timed out",
+            "timeout",
+            "502",
+            "503",
+            "504",
+            "upstream",
+        )
+    )
 
 
 def create_zip(job_dir: Path, deck_name: str) -> Path:
@@ -1522,18 +2027,40 @@ def run_generation_job(job_id: str, deck: dict[str, Any], api: dict[str, Any]) -
 
     def generate_one(record: dict[str, Any]) -> Path:
         index = record["index"]
-        with JOBS_LOCK:
-            JOBS[job_id]["slides"][index - 1]["status"] = "generating"
-        image_bytes = request_image(
-            base_url=api["base_url"],
-            api_key=api["api_key"],
-            model=record.get("model") or api["model"],
-            prompt=record["final_prompt"],
-            size=api["size"],
-            quality=api["quality"],
-            protocol=api.get("protocol", "auto"),
-            reference_images=record["reference_images"],
-        )
+        last_exc: Exception | None = None
+        for attempt in range(1, IMAGE_PAGE_RETRY_ATTEMPTS + 1):
+            with JOBS_LOCK:
+                JOBS[job_id]["slides"][index - 1]["status"] = "generating"
+                JOBS[job_id]["slides"][index - 1]["error"] = ""
+                if attempt > 1:
+                    JOBS[job_id]["message"] = (
+                        f"第 {index} 页连接不稳定，正在重试 {attempt}/{IMAGE_PAGE_RETRY_ATTEMPTS}"
+                    )
+            try:
+                image_bytes = request_image(
+                    base_url=api["base_url"],
+                    api_key=api["api_key"],
+                    model=record.get("model") or api["model"],
+                    prompt=record["final_prompt"],
+                    size=api["size"],
+                    quality=api["quality"],
+                    protocol=api.get("protocol", "auto"),
+                    reference_images=record["reference_images"],
+                )
+                break
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+                if attempt >= IMAGE_PAGE_RETRY_ATTEMPTS or not likely_transient_image_error(exc):
+                    raise
+                wait_time = min(30, 3 * attempt)
+                print(
+                    f"[WARNING] Slide {index} transient image error, "
+                    f"retrying {attempt + 1}/{IMAGE_PAGE_RETRY_ATTEMPTS} after {wait_time}s: {exc}"
+                )
+                time.sleep(wait_time)
+        else:
+            assert last_exc is not None
+            raise last_exc
         image_path = images_dir / f"slide-{index:02d}.png"
         image_path.write_bytes(image_bytes)
         with JOBS_LOCK:
@@ -1642,7 +2169,7 @@ def validate_payload(payload: dict[str, Any]) -> tuple[dict[str, Any], dict[str,
         raise ValueError("请输入 Image 生成 API Key，或设置 OPENAI_IMAGE_API_KEY / OPENAI_API_KEY 环境变量")
 
     try:
-        concurrency = max(1, min(int(payload.get("concurrency") or 2), MAX_CONCURRENCY))
+        concurrency = max(1, min(int(payload.get("concurrency") or DEFAULT_IMAGE_CONCURRENCY), MAX_CONCURRENCY))
     except (TypeError, ValueError):
         raise ValueError("并发页数必须是数字") from None
     protocol = clean_text(payload.get("protocol"), 20) or "auto"
@@ -2043,6 +2570,17 @@ def design_prompts() -> Response:
 
     # 新增：获取原始文件
     reference_files = payload.get("reference_files", [])
+    print(f"\n{'='*60}")
+    print(f"[DEBUG] /api/design/prompts received:")
+    print(f"  - brief: {brief[:100]}...")
+    print(f"  - slide_count: {slide_count}")
+    print(f"  - reference_files: {len(reference_files)} files")
+    if reference_files:
+        for i, f in enumerate(reference_files):
+            print(f"    [{i}] name={f.get('name')}, mime={f.get('mime_type')}, size={len(f.get('data', ''))} bytes (base64)")
+    print(f"  - reference_images: {len(reference_images)} images")
+    print(f"  - reference_context: {len(reference_context)} chars")
+    print(f"{'='*60}\n")
 
     messages = build_prompt_design_messages(
         brief=brief,

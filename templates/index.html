@@ -1144,7 +1144,7 @@
         const opt = document.createElement("option");
         opt.value = String(i);
         opt.textContent = String(i);
-        if (i === 2) opt.selected = true;
+        if (i === 1) opt.selected = true;
         select.appendChild(opt);
       }
     }
@@ -1731,7 +1731,14 @@
       btn.disabled = true;
       btn.textContent = "设计中...";
       $("errorBox").textContent = "";
+
+      // 创建AbortController用于超时控制
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 300000); // 5分钟超时
+
       try {
+        console.log("[DEBUG] Sending design request with reference_files:", state.referenceFiles?.length || 0);
+
         const response = await fetch("/api/design/prompts", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -1742,9 +1749,22 @@
             prompt_model: $("promptModel").value.trim() || "gpt-5.5",
             reference_files: state.referenceFiles || [],  // 新增：发送原始文件
           }),
+          signal: controller.signal,
         });
+
+        clearTimeout(timeoutId);
+
+        console.log("[DEBUG] Response status:", response.status);
+
         const result = await response.json();
+        console.log("[DEBUG] Response data:", {
+          deck_name: result.deck_name,
+          slides_count: result.slides?.length || 0,
+          has_error: !!result.error
+        });
+
         if (!response.ok) throw new Error(result.error || "页提示词设计失败");
+
         $("deckName").value = result.deck_name || $("deckName").value;
         state.slides = (result.slides || []).map((slide, index) => ({
           id: uid(),
@@ -1757,12 +1777,23 @@
           error: "",
           refine: "",
         }));
+
+        console.log("[DEBUG] Created slides:", state.slides.length);
+
         renderSlides();
         toast(`已生成 ${state.slides.length} 页提示词`);
         showPage("slides");
       } catch (error) {
-        $("errorBox").textContent = error.message;
-        toast(error.message);
+        clearTimeout(timeoutId);
+        console.error("[ERROR] Design request failed:", error);
+
+        let errorMsg = error.message;
+        if (error.name === 'AbortError') {
+          errorMsg = "请求超时：处理PDF文件耗时较长，请尝试使用较小的PDF文件";
+        }
+
+        $("errorBox").textContent = errorMsg;
+        toast(errorMsg);
       } finally {
         btn.disabled = false;
         btn.textContent = "生成页提示词";
