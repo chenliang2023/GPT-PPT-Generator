@@ -11,6 +11,7 @@ import time
 import uuid
 import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -92,7 +93,32 @@ MODELS_WITH_FILE_SUPPORT = {
     "gpt-5": True,
     "gpt-5.1": True,
     "gpt-5.5": True,
+    "gpt-5.4": True,  # 用户的模型
+    # DeepSeek models
+    "deepseek-chat": True,
+    "deepseek-reasoner": True,
 }
+
+
+@dataclass
+class ReferenceFile:
+    """参考文件数据结构"""
+
+    name: str
+    file_type: str  # "pdf", "pptx", "image", "text"
+
+    # 策略A：原始文件（优先，用于支持文件上传的模型）
+    raw_data: bytes | None = None
+    mime_type: str | None = None
+
+    # 策略B：提取的内容（降级，用于不支持文件上传的模型）
+    text_content: str | None = None
+    extracted_images: list[str] | None = None
+
+    # 元数据
+    file_size: int = 0
+    summary: str = ""
+
 
 app = Flask(__name__)
 JOBS: dict[str, dict[str, Any]] = {}
@@ -1188,6 +1214,102 @@ def process_reference_file(
     return f"{name}: unsupported reference file type.", [], warnings
 
 
+def process_reference_file_v2(
+    name: str,
+    data: bytes,
+    content_type: str,
+    model_supports_files: bool,
+) -> ReferenceFile:
+    """
+    处理参考文件（支持原生文件上传）
+
+    Args:
+        name: 文件名
+        data: 文件二进制数据
+        content_type: MIME类型
+        model_supports_files: 分析模型是否支持直接上传文件
+
+    Returns:
+        ReferenceFile对象，包含原始文件或提取的内容
+    """
+    suffix = Path(name).suffix.lower()
+    file_size = len(data)
+
+    # 图片文件：直接转为base64
+    if content_type.startswith("image/") or suffix in {".png", ".jpg", ".jpeg", ".webp"}:
+        data_url, size = image_data_url_from_bytes(data)
+        return ReferenceFile(
+            name=name,
+            file_type="image",
+            extracted_images=[data_url],
+            file_size=file_size,
+            summary=f"{name}: 图片参考，{size}",
+        )
+
+    # PDF文件：根据模型能力选择策略
+    if suffix == ".pdf" or content_type == "application/pdf":
+        if model_supports_files:
+            # 策略A：保留原始PDF
+            return ReferenceFile(
+                name=name,
+                file_type="pdf",
+                raw_data=data,
+                mime_type="application/pdf",
+                file_size=file_size,
+                summary=f"{name}: PDF文件（完整文件，AI直接分析）",
+            )
+        else:
+            # 策略B：提取内容（降级）
+            text, images, warnings = process_pdf_reference(name, data, image_slots=6)
+            return ReferenceFile(
+                name=name,
+                file_type="pdf",
+                text_content=text,
+                extracted_images=images,
+                file_size=file_size,
+                summary=f"{name}: PDF文件，已提取文字和{len(images)}张图片",
+            )
+
+    # PPTX文件：类似处理
+    if suffix == ".pptx":
+        if model_supports_files:
+            return ReferenceFile(
+                name=name,
+                file_type="pptx",
+                raw_data=data,
+                mime_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                file_size=file_size,
+                summary=f"{name}: PPTX文件（完整文件，AI直接分析）",
+            )
+        else:
+            text, images, warnings = process_pptx_reference(name, data, image_slots=6)
+            return ReferenceFile(
+                name=name,
+                file_type="pptx",
+                text_content=text,
+                extracted_images=images,
+                file_size=file_size,
+                summary=f"{name}: PPTX文件，已提取文字和{len(images)}张图片",
+            )
+
+    # 文本文件
+    if suffix in {".txt", ".md"} or content_type.startswith("text/"):
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError:
+            text = data.decode("gb18030", errors="ignore")
+        return ReferenceFile(
+            name=name,
+            file_type="text",
+            text_content=text[:12000],
+            file_size=file_size,
+            summary=f"{name}: 文本文件",
+        )
+
+    # 不支持的类型
+    raise ValueError(f"不支持的文件类型: {suffix}")
+
+
 def public_job(job: dict[str, Any]) -> dict[str, Any]:
     return {
         "id": job["id"],
@@ -1708,55 +1830,98 @@ def delete_style(style_id: str) -> Response:
 
 @app.post("/api/references")
 def upload_references() -> Response:
+    """
+    上传参考文件
+
+    现在会根据分析模型的能力选择处理策略：
+    - 如果模型支持文件：保留原始文件
+    - 如果模型不支持：提取文字和图片
+    """
     files = request.files.getlist("files")
     if not files:
         return jsonify({"error": "请上传参考文件"}), 400
     if len(files) > MAX_REFERENCE_UPLOADS:
         return jsonify({"error": f"一次最多上传 {MAX_REFERENCE_UPLOADS} 个参考文件"}), 400
 
-    reference_images: list[str] = []
-    summaries: list[str] = []
+    # 获取当前配置的分析模型（从请求参数或环境变量）
+    prompt_model = (
+        clean_text(request.args.get("prompt_model"), 200)
+        or os.getenv("OPENAI_TEXT_MODEL", "").strip()
+        or "gpt-5.5"
+    )
+    prompt_base_url = (
+        clean_text(request.args.get("prompt_base_url"), 1000)
+        or os.getenv("OPENAI_TEXT_BASE_URL", "").strip()
+        or "https://api.openai.com/v1"
+    )
+
+    # 检查模型能力
+    provider = detect_provider_from_base_url(prompt_base_url)
+    capabilities = check_model_capabilities(prompt_model, provider)
+    model_supports_files = capabilities.get("supports_files", False)
+
+    reference_files: list[ReferenceFile] = []
     warnings: list[str] = []
-    items: list[dict[str, Any]] = []
+
     for uploaded in files:
         name = safe_filename(uploaded.filename or "reference", "reference")
         data = uploaded.read(MAX_REFERENCE_FILE_BYTES + 1)
+
         if len(data) > MAX_REFERENCE_FILE_BYTES:
             warnings.append(f"{name}: 文件超过 {MAX_REFERENCE_FILE_BYTES // 1_000_000}MB，已跳过")
             continue
-        image_slots = max(0, MAX_GLOBAL_REFERENCE_IMAGES - len(reference_images))
-        try:
-            summary, images, item_warnings = process_reference_file(
-                name,
-                data,
-                uploaded.mimetype or "",
-                image_slots,
-            )
-        except Exception as exc:  # noqa: BLE001 - return a user-visible warning
-            warnings.append(f"{name}: 参考文件处理失败：{exc}")
-            continue
-        images = images[:image_slots]
-        reference_images.extend(images)
-        summaries.append(summary)
-        warnings.extend(item_warnings)
-        items.append(
-            {
-                "name": name,
-                "summary": summary,
-                "image_count": len(images),
-            }
-        )
 
-    reference_context = text_preview(
-        "\n\n".join(summary for summary in summaries if summary),
-        MAX_REFERENCE_CONTEXT_LENGTH,
-    )
+        try:
+            ref_file = process_reference_file_v2(
+                name=name,
+                data=data,
+                content_type=uploaded.mimetype or "",
+                model_supports_files=model_supports_files,
+            )
+            reference_files.append(ref_file)
+        except Exception as exc:  # noqa: BLE001
+            warnings.append(f"{name}: 处理失败 - {exc}")
+
+    # 构建返回结果
+    items = [
+        {
+            "name": ref.name,
+            "file_type": ref.file_type,
+            "summary": ref.summary,
+            "has_raw_file": ref.raw_data is not None,
+            "image_count": len(ref.extracted_images) if ref.extracted_images else 0,
+        }
+        for ref in reference_files
+    ]
+
+    # 分离原始文件和提取内容
+    raw_files = [
+        {
+            "name": ref.name,
+            "data": base64.b64encode(ref.raw_data).decode() if ref.raw_data else None,
+            "mime_type": ref.mime_type,
+        }
+        for ref in reference_files
+        if ref.raw_data
+    ]
+
+    extracted_text = "\n\n".join(ref.text_content for ref in reference_files if ref.text_content)
+
+    extracted_images = []
+    for ref in reference_files:
+        if ref.extracted_images:
+            extracted_images.extend(ref.extracted_images)
+
+    reference_context = text_preview(extracted_text, MAX_REFERENCE_CONTEXT_LENGTH)
+
     return jsonify(
         {
             "items": items,
-            "reference_images": reference_images,
+            "raw_files": raw_files,  # 新增：原始文件
             "reference_context": reference_context,
+            "reference_images": extracted_images[:MAX_GLOBAL_REFERENCE_IMAGES],
             "warnings": warnings,
+            "model_supports_files": model_supports_files,  # 告诉前端使用了哪种策略
         }
     )
 

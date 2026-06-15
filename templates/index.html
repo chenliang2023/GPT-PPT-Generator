@@ -352,16 +352,46 @@
     .custom-language.visible { display: grid; }
 
     .dropzone {
-      border: 1px dashed rgba(52,120,246,0.34);
+      border: 2px dashed rgba(52,120,246,0.34);
       border-radius: 18px;
       background: linear-gradient(145deg, rgba(234,242,255,0.72), rgba(255,255,255,0.74));
-      padding: 15px;
+      padding: 32px 24px;
       display: grid;
       gap: 12px;
+      cursor: pointer;
+      transition: all 0.2s ease;
+      text-align: center;
     }
-    .dropzone-row { display: flex; gap: 12px; justify-content: space-between; align-items: center; flex-wrap: wrap; }
-    .file-input { max-width: 340px; padding: 7px; background: rgba(255,255,255,0.86); }
-    .reference-list { display: grid; gap: 8px; margin-top: 2px; }
+    .dropzone:hover {
+      border-color: rgba(52,120,246,0.6);
+      background: linear-gradient(145deg, rgba(234,242,255,0.85), rgba(255,255,255,0.85));
+    }
+    .dropzone.dragging {
+      border-color: #3478F6;
+      background: rgba(234,242,255,0.95);
+      border-width: 3px;
+    }
+    .dropzone-content {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 8px;
+    }
+    .dropzone-icon {
+      font-size: 48px;
+      color: rgba(52,120,246,0.6);
+    }
+    .dropzone-title {
+      font-size: 16px;
+      font-weight: 600;
+      color: #1e293b;
+    }
+    .dropzone-subtitle {
+      font-size: 13px;
+      color: #64748b;
+    }
+    .file-input { display: none; }
+    .reference-list { display: grid; gap: 8px; margin-top: 12px; text-align: left; }
     .reference-item {
       border: 1px solid var(--line); border-radius: 14px;
       background: rgba(255,255,255,0.78); padding: 10px 12px; display: flex; justify-content: space-between; gap: 10px;
@@ -645,8 +675,7 @@
       <div class="nav-label">流程</div>
       <nav class="nav-list">
         <button class="nav-item active" type="button" data-nav="home"><span class="nav-icon">✦</span><span>开始</span></button>
-        <button class="nav-item" type="button" data-nav="brief"><span class="nav-icon">▤</span><span>总体需求</span></button>
-        <button class="nav-item" type="button" data-nav="assets"><span class="nav-icon">◫</span><span>参考与补充</span></button>
+        <button class="nav-item" type="button" data-nav="brief"><span class="nav-icon">▤</span><span>需求与参考</span></button>
         <button class="nav-item" type="button" data-nav="slides"><span class="nav-icon">▦</span><span>页面编辑</span></button>
         <button class="nav-item" type="button" data-nav="exports"><span class="nav-icon">◌</span><span>生成导出</span></button>
         <button class="nav-item" type="button" data-nav="settings"><span class="nav-icon">⚙</span><span>系统设置</span></button>
@@ -683,10 +712,10 @@
         </div>
         <div class="panel-body">
           <div class="step-grid">
-            <div class="step-card"><b>1. 总体需求</b><span>写清主题、受众和目标。</span></div>
-            <div class="step-card"><b>2. 参考与补充</b><span>上传资料，再补充全局要求。</span></div>
-            <div class="step-card"><b>3. 生成页提示词</b><span>资料齐了再拆成页面。</span></div>
-            <div class="step-card"><b>4. 编辑与导出</b><span>逐页微调，最后生成文件。</span></div>
+            <div class="step-card"><b>1. 需求与参考</b><span>写需求、上传资料、补充要求。</span></div>
+            <div class="step-card"><b>2. 生成页提示词</b><span>AI拆分成逐页提示词。</span></div>
+            <div class="step-card"><b>3. 编辑与调整</b><span>逐页微调提示词和参考图。</span></div>
+            <div class="step-card"><b>4. 生成与导出</b><span>生成图片并导出文件。</span></div>
           </div>
         </div>
       </section>
@@ -694,9 +723,10 @@
       <section id="briefPanel" class="panel feature-panel page-view">
         <div class="panel-head">
           <div>
-            <h2 class="panel-title">总体需求</h2>
-            <p class="panel-sub">先描述你要做什么，不急着生成。</p>
+            <h2 class="panel-title">项目需求与参考资料</h2>
+            <p class="panel-sub">描述需求、配置参数、上传参考资料，然后生成页提示词。</p>
           </div>
+          <button id="clearReferencesBtn" class="btn small">清空参考</button>
         </div>
         <div class="panel-body stack">
           <div class="brief-layout">
@@ -705,7 +735,7 @@
             </label>
             <div class="brief-action-card">
               <div>
-                <strong>下一步会补充参考资料</strong>
+                <strong>填写需求，上传参考，生成页面</strong>
                 <p>参考文件和补充要求会一起参与页提示词生成。</p>
               </div>
               <div class="brief-summary">
@@ -714,7 +744,6 @@
                 <div class="brief-chip"><span>画面比例</span><b>16:9</b></div>
                 <div class="brief-chip"><span>导出格式</span><b>PPTX/PDF</b></div>
               </div>
-              <button class="btn primary" type="button" data-go="assets">继续补充资料</button>
             </div>
           </div>
           <div class="settings-strip">
@@ -744,50 +773,44 @@
           <label id="customLanguageWrap" class="custom-language">自定义语言要求
             <input id="customLanguageRequirement" placeholder="例如：所有标题用中文，图表标签保留英文缩写。">
           </label>
+
+          <!-- 参考资料上传区域 -->
+          <div id="dropzone" class="dropzone">
+            <input id="referenceFiles" class="file-input" type="file" multiple accept=".png,.jpg,.jpeg,.webp,.pdf,.ppt,.pptx,.txt,.md,image/*,application/pdf">
+            <div class="dropzone-content">
+              <div class="dropzone-icon">📎</div>
+              <div class="dropzone-title">上传参考内容</div>
+              <div class="dropzone-subtitle">点击或拖拽文件到此区域</div>
+              <div class="dropzone-subtitle">支持图片、PDF、PPTX、TXT/MD</div>
+            </div>
+            <div id="referenceList" class="reference-list"></div>
+            <div id="referenceWarnings" class="stack"></div>
+          </div>
+
+          <!-- 总体提示词补充 -->
+          <label>总体提示词补充
+            <textarea id="globalAddendum" placeholder="例如：所有页面避免过度装饰；关键数字必须醒目；不使用真实品牌 logo；保持企业级审美。"></textarea>
+          </label>
+
           <div class="flow-actions">
-            <button class="btn" type="button" data-go="home">上一步</button>
-            <button class="btn primary" type="button" data-go="assets">下一步：参考资料</button>
+            <button class="btn" type="button" data-go="home">返回首页</button>
+            <button id="designBtn" class="btn primary">生成页提示词</button>
           </div>
         </div>
       </section>
 
-      <div id="assetsView" class="page-view">
+      <div id="assetsView" class="page-view" style="display: none;">
+        <!-- 保留空的assetsView用于向后兼容，但默认隐藏 -->
         <section id="assetsPanel" class="panel">
           <div class="panel-head">
             <div>
               <h2 class="panel-title">参考与补充</h2>
-              <p class="panel-sub">上传资料并补充整体要求，然后生成页提示词。</p>
+              <p class="panel-sub">此页面已合并到"项目需求与参考资料"。</p>
             </div>
-            <button id="clearReferencesBtn" class="btn small">清空</button>
           </div>
           <div class="panel-body stack">
-            <div class="dropzone">
-              <div class="dropzone-row">
-                <div>
-                  <strong>上传样式或内容参考</strong>
-                  <div class="panel-sub">支持图片、PDF、PPTX、TXT/MD</div>
-                </div>
-                <input id="referenceFiles" class="file-input" type="file" multiple accept=".png,.jpg,.jpeg,.webp,.pdf,.ppt,.pptx,.txt,.md,image/*,application/pdf">
-              </div>
-              <div id="referenceList" class="reference-list"></div>
-              <div id="referenceWarnings" class="stack"></div>
-            </div>
-            <label>总体提示词补充
-              <textarea id="globalAddendum" placeholder="例如：所有页面避免过度装饰；关键数字必须醒目；不使用真实品牌 logo；保持企业级审美。"></textarea>
-            </label>
-            <div class="brief-action-card">
-              <div>
-                <strong>资料已准备好后再生成</strong>
-                <p>总体需求、参考文件和补充要求会一起用于拆页。</p>
-              </div>
-              <div class="brief-summary">
-                <div class="brief-chip"><span>生成内容</span><b>页提示词</b></div>
-                <div class="brief-chip"><span>可继续</span><b>逐页编辑</b></div>
-                <div class="brief-chip"><span>参考图</span><b>自动带入</b></div>
-                <div class="brief-chip"><span>下一步</span><b>页面编辑</b></div>
-              </div>
-              <button id="designBtn" class="btn primary">生成页提示词</button>
-            </div>
+            <p>参考资料功能已合并到"项目需求与参考资料"页面。</p>
+            <button class="btn primary" type="button" data-go="brief">返回项目需求</button>
           </div>
         </section>
         <div class="flow-actions">
@@ -853,24 +876,24 @@
 
   <div id="guideModal" class="modal guide-modal" aria-hidden="true">
     <div class="guide-card">
-      <div class="guide-head">
+      <div class=”guide-head”>
         <h2>使用说明</h2>
-        <p>按顺序完成四步。每一页只处理当前阶段需要的信息。</p>
+        <p>按顺序完成三步。每一页只处理当前阶段需要的信息。</p>
       </div>
-      <div class="guide-book">
-        <div class="guide-toc">
-          <button class="active" type="button" data-guide-page="0">1. 写总体需求</button>
-          <button type="button" data-guide-page="1">2. 补参考资料</button>
-          <button type="button" data-guide-page="2">3. 生成并编辑</button>
-          <button type="button" data-guide-page="3">4. 导出文件</button>
+      <div class=”guide-book”>
+        <div class=”guide-toc”>
+          <button class=”active” type=”button” data-guide-page=”0”>1. 需求与参考</button>
+          <button type=”button” data-guide-page=”1”>2. 生成并编辑</button>
+          <button type=”button” data-guide-page=”2”>3. 导出文件</button>
         </div>
-        <div class="guide-page">
-          <h3 id="guidePageTitle">先写总体需求</h3>
-          <p id="guidePageText">描述主题、受众、页数和你想表达的重点。这里不需要上传文件，也不急着生成。</p>
-          <ul id="guidePageList">
-            <li>写清楚“给谁看”和“希望对方记住什么”。</li>
-            <li>页数、语言和风格可以在同一页设置。</li>
-            <li>下一步再补充参考文件和全局要求。</li>
+        <div class=”guide-page”>
+          <h3 id=”guidePageTitle”>需求与参考</h3>
+          <p id=”guidePageText”>在同一页完成需求描述、参数配置、参考资料上传和补充要求。</p>
+          <ul id=”guidePageList”>
+            <li>写清楚”给谁看”和”希望对方记住什么”。</li>
+            <li>设置页数、语言和风格。</li>
+            <li>上传参考文件（图片、PDF、PPTX）。</li>
+            <li>补充总体提示词要求。</li>
           </ul>
         </div>
       </div>
@@ -1064,9 +1087,11 @@
       styles: [],
       slides: [],
       globalReferenceImages: [],
+      referenceFiles: [],  // 新增：原始文件列表
       referenceItems: [],
       referenceContext: "",
       referenceWarnings: [],
+      modelSupportsFiles: false,  // 新增：模型是否支持文件
       pollTimer: null,
       lastJobId: "",
       apiKeyConfigured: false,
@@ -1464,12 +1489,20 @@
       if (!state.referenceItems.length) {
         list.innerHTML = '<div class="panel-sub">暂无参考资料</div>';
       } else {
-        list.innerHTML = state.referenceItems.map((item) => `
-          <div class="reference-item">
-            <span>${esc(item.name)}</span>
-            <span>${item.image_count || 0} 张视觉参考</span>
-          </div>
-        `).join("");
+        list.innerHTML = state.referenceItems.map((item) => {
+          const strategyBadge = item.has_raw_file
+            ? '<span class="badge success" style="margin-left: 8px; padding: 2px 8px; background: #10b981; color: white; border-radius: 4px; font-size: 12px;">✓ 完整文件</span>'
+            : item.image_count > 0
+            ? `<span class="badge warning" style="margin-left: 8px; padding: 2px 8px; background: #f59e0b; color: white; border-radius: 4px; font-size: 12px;">${item.image_count} 张图片</span>`
+            : '';
+
+          return `
+            <div class="reference-item">
+              <span>${esc(item.name)}${strategyBadge}</span>
+              <span style="color: #64748b; font-size: 13px;">${esc(item.summary)}</span>
+            </div>
+          `;
+        }).join("");
       }
       $("referenceWarnings").innerHTML = state.referenceWarnings.map((warning) => (
         `<div class="warning">${esc(warning)}</div>`
@@ -1480,21 +1513,41 @@
       if (!files.length) return;
       const form = new FormData();
       files.forEach((file) => form.append("files", file));
+
+      // 传递当前配置的分析模型信息
+      const promptModel = $("promptModel").value.trim();
+      const promptBaseUrl = $("promptBaseUrl").value.trim();
+      const url = new URL("/api/references", window.location.origin);
+      if (promptModel) url.searchParams.append("prompt_model", promptModel);
+      if (promptBaseUrl) url.searchParams.append("prompt_base_url", promptBaseUrl);
+
       toast("正在处理参考资料...");
       try {
-        const response = await fetch("/api/references", { method: "POST", body: form });
+        const response = await fetch(url, { method: "POST", body: form });
         const result = await response.json();
         if (!response.ok) throw new Error(result.error || "参考资料处理失败");
+
         state.referenceItems.push(...(result.items || []));
         state.referenceWarnings.push(...(result.warnings || []));
+
+        // 保存原始文件（用于后续发送给AI）
+        state.referenceFiles = state.referenceFiles || [];
+        state.referenceFiles.push(...(result.raw_files || []));
+
+        // 保存提取的图片（降级策略）
         state.globalReferenceImages = [
           ...state.globalReferenceImages,
           ...(result.reference_images || []),
         ].slice(0, 6);
+
         state.referenceContext = [state.referenceContext, result.reference_context]
           .filter(Boolean)
           .join("\n\n")
           .slice(0, 12000);
+
+        // 保存模型能力信息
+        state.modelSupportsFiles = result.model_supports_files || false;
+
         renderReferences();
         toast("参考资料已加入");
       } catch (error) {
@@ -2063,14 +2116,9 @@
 
     const guidePages = [
       {
-        title: "先写总体需求",
-        text: "描述主题、受众、页数和你想表达的重点。这里不需要上传文件，也不急着生成。",
-        items: ["写清楚给谁看。", "写清楚希望对方记住什么。", "页数、语言和风格在同一页设置。"],
-      },
-      {
-        title: "再补参考资料",
-        text: "上传参考文件，或补充全局要求。资料准备好后，再点击生成页提示词。",
-        items: ["图片会作为视觉参考。", "PDF、PPTX、TXT 会提取内容上下文。", "全局补充适合写禁用元素、品牌语气和视觉限制。"],
+        title: "需求与参考",
+        text: "在同一页完成需求描述、参数配置、参考资料上传和补充要求。",
+        items: ["写清楚给谁看和希望对方记住什么。", "设置页数、语言和风格。", "上传参考文件（图片、PDF、PPTX）。", "补充总体提示词要求。"],
       },
       {
         title: "生成后逐页检查",
@@ -2171,11 +2219,54 @@
         uploadReferences([...event.target.files]);
         event.target.value = "";
       });
+
+      // 拖拽上传支持
+      const dropzone = $("dropzone");
+      const fileInput = $("referenceFiles");
+
+      // 点击整个区域触发文件选择
+      dropzone.addEventListener("click", (e) => {
+        if (e.target === fileInput) return; // 避免重复触发
+        fileInput.click();
+      });
+
+      // 阻止默认拖拽行为
+      ["dragenter", "dragover", "dragleave", "drop"].forEach(eventName => {
+        dropzone.addEventListener(eventName, (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+        });
+      });
+
+      // 拖拽进入时高亮
+      ["dragenter", "dragover"].forEach(eventName => {
+        dropzone.addEventListener(eventName, () => {
+          dropzone.classList.add("dragging");
+        });
+      });
+
+      // 拖拽离开时取消高亮
+      ["dragleave", "drop"].forEach(eventName => {
+        dropzone.addEventListener(eventName, () => {
+          dropzone.classList.remove("dragging");
+        });
+      });
+
+      // 处理文件拖放
+      dropzone.addEventListener("drop", (e) => {
+        const files = [...e.dataTransfer.files];
+        if (files.length > 0) {
+          uploadReferences(files);
+        }
+      });
+
       $("clearReferencesBtn").addEventListener("click", () => {
         state.globalReferenceImages = [];
+        state.referenceFiles = [];  // 新增：清空原始文件
         state.referenceItems = [];
         state.referenceContext = "";
         state.referenceWarnings = [];
+        state.modelSupportsFiles = false;  // 新增：重置模型能力标志
         renderReferences();
       });
       $("designBtn").addEventListener("click", designPrompts);
