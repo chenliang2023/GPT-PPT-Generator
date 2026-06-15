@@ -1740,6 +1740,7 @@
             instruction: brief,
             slide_count: Number($("slideCount").value || 8),
             prompt_model: $("promptModel").value.trim() || "gpt-5.5",
+            reference_files: state.referenceFiles || [],  // 新增：发送原始文件
           }),
         });
         const result = await response.json();

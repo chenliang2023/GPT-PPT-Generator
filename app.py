@@ -9,6 +9,7 @@ import re
 import threading
 import time
 import uuid
+import warnings
 import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -21,6 +22,10 @@ from PIL import Image
 from pptx import Presentation
 from pptx.enum.shapes import MSO_SHAPE_TYPE
 from pptx.util import Inches
+
+# 禁用SSL警告
+import urllib3
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 try:  # Optional: richer PDF reference handling when installed.
     import fitz  # PyMuPDF
@@ -653,7 +658,7 @@ def request_model_list(base_url: str, api_key: str, provider: str = PROVIDER_OPE
     headers = {"Authorization": f"Bearer {api_key}"}
     try:
         with requests.Session() as session:
-            response = session.get(endpoint, headers=headers, timeout=60)
+            response = session.get(endpoint, headers=headers, timeout=60, verify=False)
     except requests.RequestException as exc:
         raise RuntimeError(f"模型列表连接失败: {exc}") from exc
     if not response.ok:
@@ -753,7 +758,11 @@ def request_with_retries(
             for payload in payloads:
                 try:
                     response = session.post(
-                        endpoint, headers=headers, json=payload, timeout=600
+                        endpoint,
+                        headers=headers,
+                        json=payload,
+                        timeout=600,
+                        verify=False,  # 跳过SSL证书验证
                     )
                 except requests.RequestException as exc:
                     last_exception = exc
@@ -1013,6 +1022,7 @@ def build_prompt_design_messages(
     global_prompt_addendum: str,
     reference_context: str,
     reference_images: list[str],
+    reference_files: list[dict] | None = None,  # 新增：原始文件
 ) -> list[dict[str, Any]]:
     user_prompt = f"""
 User deck instruction:
@@ -1062,13 +1072,65 @@ Return strict JSON only, with this shape:
         "prompt plan for generating polished presentation slide images. "
         "Return valid JSON only."
     )
+
+    # 构建多模态消息内容
+    reference_files = reference_files or []
+    user_content = build_multimodal_content(
+        text=user_prompt,
+        reference_files=reference_files,  # 优先使用原始文件
+        reference_images=reference_images,  # 降级使用提取的图片
+    )
+
     return [
         {"role": "system", "content": system_prompt},
-        {
-            "role": "user",
-            "content": multimodal_user_content(user_prompt, reference_images),
-        },
+        {"role": "user", "content": user_content},
     ]
+
+
+def build_multimodal_content(
+    text: str,
+    reference_files: list[dict] | None = None,
+    reference_images: list[str] | None = None,
+) -> str | list[dict[str, Any]]:
+    """
+    构建支持文件上传的多模态消息内容
+
+    优先使用原始文件，降级使用提取的图片
+    """
+    reference_files = reference_files or []
+    reference_images = reference_images or []
+
+    # 如果没有文件和图片，返回纯文本
+    if not reference_files and not reference_images:
+        return text
+
+    # 构建多模态内容
+    content: list[dict[str, Any]] = [{"type": "text", "text": text}]
+
+    # 策略A：如果有原始文件，使用NewAPI的file格式
+    if reference_files:
+        for file in reference_files:
+            if file.get("data") and file.get("mime_type"):
+                content.append({
+                    "type": "file",  # NewAPI格式
+                    "file": {
+                        "data": file["data"],
+                        "filename": file.get("name", "document.pdf"),
+                        "mime_type": file["mime_type"],
+                    }
+                })
+        return content
+
+    # 策略B：降级使用提取的图片
+    if reference_images:
+        for image_url in reference_images:
+            content.append({
+                "type": "image_url",
+                "image_url": {"url": image_url}
+            })
+        return content
+
+    return text
 
 
 def image_data_url_from_bytes(data: bytes, fallback_mime: str = "image/png") -> tuple[str, str]:
@@ -1235,7 +1297,7 @@ def process_reference_file_v2(
     suffix = Path(name).suffix.lower()
     file_size = len(data)
 
-    # 图片文件：直接转为base64
+    # 图片文件：始终转为base64（图片本身就是视觉内容，不需要提取）
     if content_type.startswith("image/") or suffix in {".png", ".jpg", ".jpeg", ".webp"}:
         data_url, size = image_data_url_from_bytes(data)
         return ReferenceFile(
@@ -1249,7 +1311,7 @@ def process_reference_file_v2(
     # PDF文件：根据模型能力选择策略
     if suffix == ".pdf" or content_type == "application/pdf":
         if model_supports_files:
-            # 策略A：保留原始PDF
+            # 策略A：保留原始PDF，不提取
             return ReferenceFile(
                 name=name,
                 file_type="pdf",
@@ -1259,7 +1321,7 @@ def process_reference_file_v2(
                 summary=f"{name}: PDF文件（完整文件，AI直接分析）",
             )
         else:
-            # 策略B：提取内容（降级）
+            # 策略B：提取内容（降级，仅用于不支持文件的模型）
             text, images, warnings = process_pdf_reference(name, data, image_slots=6)
             return ReferenceFile(
                 name=name,
@@ -1267,12 +1329,13 @@ def process_reference_file_v2(
                 text_content=text,
                 extracted_images=images,
                 file_size=file_size,
-                summary=f"{name}: PDF文件，已提取文字和{len(images)}张图片",
+                summary=f"{name}: PDF文件（模型不支持文件，已提取文字和{len(images)}张图片）",
             )
 
     # PPTX文件：类似处理
     if suffix == ".pptx":
         if model_supports_files:
+            # 策略A：保留原始PPTX，不提取
             return ReferenceFile(
                 name=name,
                 file_type="pptx",
@@ -1282,6 +1345,7 @@ def process_reference_file_v2(
                 summary=f"{name}: PPTX文件（完整文件，AI直接分析）",
             )
         else:
+            # 策略B：提取内容（降级）
             text, images, warnings = process_pptx_reference(name, data, image_slots=6)
             return ReferenceFile(
                 name=name,
@@ -1289,10 +1353,10 @@ def process_reference_file_v2(
                 text_content=text,
                 extracted_images=images,
                 file_size=file_size,
-                summary=f"{name}: PPTX文件，已提取文字和{len(images)}张图片",
+                summary=f"{name}: PPTX文件（模型不支持文件，已提取文字和{len(images)}张图片）",
             )
 
-    # 文本文件
+    # 文本文件：直接读取内容
     if suffix in {".txt", ".md"} or content_type.startswith("text/"):
         try:
             text = data.decode("utf-8")
@@ -1976,6 +2040,10 @@ def design_prompts() -> Response:
         payload.get("reference_context"),
         MAX_REFERENCE_CONTEXT_LENGTH,
     )
+
+    # 新增：获取原始文件
+    reference_files = payload.get("reference_files", [])
+
     messages = build_prompt_design_messages(
         brief=brief,
         deck_name=deck_name,
@@ -1985,6 +2053,7 @@ def design_prompts() -> Response:
         global_prompt_addendum=global_prompt_addendum,
         reference_context=reference_context,
         reference_images=reference_images,
+        reference_files=reference_files,  # 新增：传递原始文件
     )
     try:
         text = request_chat_text_api(base_url, api_key, prompt_model, messages)
@@ -2165,7 +2234,7 @@ def _get_image_data_url(url_or_path: str) -> str:
     # External URL — download it
     if url_or_path.startswith(("https://", "http://")):
         try:
-            r = requests.get(url_or_path, timeout=60)
+            r = requests.get(url_or_path, timeout=60, verify=False)
             r.raise_for_status()
             b64 = base64.b64encode(r.content).decode()
             ct = r.headers.get("content-type", "image/png")
