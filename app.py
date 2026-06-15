@@ -49,6 +49,51 @@ DEFAULT_SLIDE_WIDTH_INCHES = 16
 DEFAULT_SLIDE_HEIGHT_INCHES = 9
 OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
 
+# Model provider constants
+PROVIDER_OPENAI = "openai"
+PROVIDER_ANTHROPIC = "anthropic"
+SUPPORTED_PROVIDERS = [PROVIDER_OPENAI, PROVIDER_ANTHROPIC]
+
+# Provider preset configurations
+PROVIDER_PRESETS = {
+    PROVIDER_OPENAI: {
+        "name": "OpenAI",
+        "default_base_url": "https://api.openai.com/v1",
+        "default_models": ["gpt-5.5", "gpt-5.1", "gpt-5", "gpt-4.1", "gpt-4o", "gpt-4o-mini"],
+        "api_key_env": "OPENAI_TEXT_API_KEY",
+        "base_url_env": "OPENAI_TEXT_BASE_URL",
+        "model_env": "OPENAI_TEXT_MODEL",
+    },
+    PROVIDER_ANTHROPIC: {
+        "name": "Anthropic",
+        "default_base_url": "https://api.anthropic.com/v1",
+        "default_models": ["claude-3-5-sonnet-20241022", "claude-3-5-haiku-20241022", "claude-3-opus-20240229", "claude-3-sonnet-20240229"],
+        "api_key_env": "ANTHROPIC_API_KEY",
+        "base_url_env": "ANTHROPIC_BASE_URL",
+        "model_env": "ANALYSIS_MODEL_NAME",
+    },
+}
+
+# Known models with file upload support
+MODELS_WITH_FILE_SUPPORT = {
+    # Anthropic models (Claude 3.5+)
+    "claude-3-5-sonnet-20241022": True,
+    "claude-3-5-sonnet-20240620": True,
+    "claude-3-5-haiku-20241022": True,
+    "claude-3-opus-20240229": False,
+    "claude-3-sonnet-20240229": False,
+    "claude-3-haiku-20240307": False,
+    # OpenAI models (GPT-4 Vision and newer)
+    "gpt-4o": True,
+    "gpt-4o-mini": True,
+    "gpt-4-turbo": True,
+    "gpt-4-vision-preview": True,
+    "gpt-4.1": True,
+    "gpt-5": True,
+    "gpt-5.1": True,
+    "gpt-5.5": True,
+}
+
 app = Flask(__name__)
 JOBS: dict[str, dict[str, Any]] = {}
 JOBS_LOCK = threading.Lock()
@@ -495,6 +540,53 @@ def translate_text_api_error(last_response: requests.Response) -> RuntimeError:
     return RuntimeError(f"文本模型请求失败 ({last_response.status_code}): {detail}")
 
 
+def detect_provider_from_base_url(base_url: str) -> str:
+    """Detect the model provider from the base URL."""
+    normalized = base_url.lower().strip().rstrip("/")
+    if "anthropic" in normalized:
+        return PROVIDER_ANTHROPIC
+    return PROVIDER_OPENAI
+
+
+def get_provider_config(provider: str) -> dict[str, Any] | None:
+    """Get provider configuration preset."""
+    return PROVIDER_PRESETS.get(provider, PROVIDER_PRESETS[PROVIDER_OPENAI])
+
+
+def check_model_capabilities(model_name: str, provider: str = None) -> dict[str, Any]:
+    """Check model capabilities including file upload support."""
+    if provider is None:
+        provider = PROVIDER_OPENAI
+
+    # Check known models
+    model_lower = model_name.lower()
+    for known_model, has_files in MODELS_WITH_FILE_SUPPORT.items():
+        if known_model.lower() in model_lower or model_lower in known_model.lower():
+            return {
+                "supports_files": has_files,
+                "supports_images": True,  # Most modern models support images
+                "max_file_size": 50_000_000 if provider == PROVIDER_ANTHROPIC else 25_000_000,
+                "known_model": True,
+            }
+
+    # Default assumptions based on provider
+    if provider == PROVIDER_ANTHROPIC:
+        # Assume newer Claude models have file support
+        return {
+            "supports_files": "sonnet" in model_lower or "haiku" in model_lower,
+            "supports_images": True,
+            "max_file_size": 50_000_000,
+            "known_model": False,
+        }
+    else:  # OpenAI
+        return {
+            "supports_files": "gpt-4" in model_lower or "gpt-5" in model_lower,
+            "supports_images": "gpt-4" in model_lower or "gpt-5" in model_lower,
+            "max_file_size": 25_000_000,
+            "known_model": False,
+        }
+
+
 def extract_model_ids(payload: dict[str, Any]) -> list[str]:
     candidates = payload.get("data")
     if not isinstance(candidates, list):
@@ -523,7 +615,14 @@ def extract_model_ids(payload: dict[str, Any]) -> list[str]:
     return models
 
 
-def request_model_list(base_url: str, api_key: str) -> list[str]:
+def request_model_list(base_url: str, api_key: str, provider: str = PROVIDER_OPENAI) -> list[str]:
+    """Request list of available models from the API."""
+    provider = provider or detect_provider_from_base_url(base_url)
+
+    if provider == PROVIDER_ANTHROPIC:
+        # Anthropic doesn't have a public models endpoint, return preset models
+        return get_provider_config(PROVIDER_ANTHROPIC)["default_models"]
+
     endpoint = f"{normalize_api_base(base_url)}/models"
     headers = {"Authorization": f"Bearer {api_key}"}
     try:
@@ -544,23 +643,51 @@ def request_model_list(base_url: str, api_key: str) -> list[str]:
     return models
 
 
-def resolve_api_settings(payload: dict[str, Any]) -> tuple[str, str, str]:
+def resolve_api_settings(payload: dict[str, Any]) -> tuple[str, str, str, str]:
+    """Resolve API settings for image or prompt analysis.
+    Returns (target, base_url, api_key, provider)
+    """
     target = clean_text(payload.get("target"), 20) or "image"
     default_base_url = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+
+    # Get provider from payload or detect from base_url
+    provider = clean_text(payload.get("provider"), 20) or ""
+    if provider and provider not in SUPPORTED_PROVIDERS:
+        raise ValueError(f"不支持的提供商: {provider}")
+
     if target == "prompt":
-        api_key = (
-            clean_text(payload.get("prompt_api_key"))
-            or clean_text(payload.get("api_key"))
-            or os.getenv("OPENAI_TEXT_API_KEY", "").strip()
-            or os.getenv("OPENAI_API_KEY", "").strip()
-        )
-        base_url = (
-            clean_text(payload.get("prompt_base_url"), 1000)
-            or clean_text(payload.get("base_url"), 1000)
-            or os.getenv("OPENAI_TEXT_BASE_URL", "").strip()
-            or default_base_url
-        )
-        label = "GPT 分析"
+        # For prompt analysis, check provider first
+        if not provider:
+            provider = os.getenv("ANALYSIS_MODEL_PROVIDER", "").strip() or PROVIDER_OPENAI
+        if provider == PROVIDER_ANTHROPIC:
+            api_key = (
+                clean_text(payload.get("prompt_api_key"))
+                or clean_text(payload.get("api_key"))
+                or os.getenv("ANTHROPIC_API_KEY", "").strip()
+                or os.getenv("OPENAI_TEXT_API_KEY", "").strip()
+                or os.getenv("OPENAI_API_KEY", "").strip()
+            )
+            base_url = (
+                clean_text(payload.get("prompt_base_url"), 1000)
+                or clean_text(payload.get("base_url"), 1000)
+                or os.getenv("ANTHROPIC_BASE_URL", "").strip()
+                or os.getenv("OPENAI_TEXT_BASE_URL", "").strip()
+                or get_provider_config(PROVIDER_ANTHROPIC)["default_base_url"]
+            )
+        else:  # OpenAI
+            api_key = (
+                clean_text(payload.get("prompt_api_key"))
+                or clean_text(payload.get("api_key"))
+                or os.getenv("OPENAI_TEXT_API_KEY", "").strip()
+                or os.getenv("OPENAI_API_KEY", "").strip()
+            )
+            base_url = (
+                clean_text(payload.get("prompt_base_url"), 1000)
+                or clean_text(payload.get("base_url"), 1000)
+                or os.getenv("OPENAI_TEXT_BASE_URL", "").strip()
+                or default_base_url
+            )
+        label = "分析模型"
     elif target == "image":
         api_key = (
             clean_text(payload.get("image_api_key"))
@@ -574,12 +701,13 @@ def resolve_api_settings(payload: dict[str, Any]) -> tuple[str, str, str]:
             or os.getenv("OPENAI_IMAGE_BASE_URL", "").strip()
             or default_base_url
         )
+        provider = detect_provider_from_base_url(base_url)
         label = "Image 生成"
     else:
         raise ValueError("无效的 API 测试目标")
     if not api_key:
         raise ValueError(f"请输入 {label} API Key")
-    return target, base_url, api_key
+    return target, base_url, api_key, provider
 
 
 def request_with_retries(
@@ -1381,26 +1509,59 @@ def health() -> Response:
 def config() -> Response:
     default_base_url = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
     image_base_url = os.getenv("OPENAI_IMAGE_BASE_URL", "").strip() or default_base_url
-    prompt_base_url = os.getenv("OPENAI_TEXT_BASE_URL", "").strip() or default_base_url
+
+    # Analysis model configuration
+    analysis_provider = os.getenv("ANALYSIS_MODEL_PROVIDER", "").strip() or PROVIDER_OPENAI
+    analysis_config = get_provider_config(analysis_provider)
+
+    if analysis_provider == PROVIDER_ANTHROPIC:
+        prompt_base_url = os.getenv("ANTHROPIC_BASE_URL", "").strip() or analysis_config["default_base_url"]
+        analysis_model = os.getenv("ANALYSIS_MODEL_NAME", "").strip() or os.getenv("OPENAI_TEXT_MODEL", "claude-3-5-sonnet-20241022")
+        prompt_key_configured = bool(
+            os.getenv("ANTHROPIC_API_KEY", "").strip()
+            or os.getenv("OPENAI_TEXT_API_KEY", "").strip()
+            or os.getenv("OPENAI_API_KEY", "").strip()
+        )
+    else:  # OpenAI
+        prompt_base_url = os.getenv("OPENAI_TEXT_BASE_URL", "").strip() or default_base_url
+        analysis_model = os.getenv("OPENAI_TEXT_MODEL", "gpt-5.5")
+        prompt_key_configured = bool(
+            os.getenv("OPENAI_TEXT_API_KEY", "").strip()
+            or os.getenv("OPENAI_API_KEY", "").strip()
+        )
+
     image_key_configured = bool(
         os.getenv("OPENAI_IMAGE_API_KEY", "").strip()
         or os.getenv("OPENAI_API_KEY", "").strip()
     )
-    prompt_key_configured = bool(
-        os.getenv("OPENAI_TEXT_API_KEY", "").strip()
-        or os.getenv("OPENAI_API_KEY", "").strip()
-    )
+
+    # Check model capabilities for file upload
+    analysis_capabilities = check_model_capabilities(analysis_model, analysis_provider)
+
     return jsonify(
         {
             "base_url": default_base_url,
             "image_base_url": image_base_url,
             "prompt_base_url": prompt_base_url,
             "model": os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-2"),
-            "prompt_model": os.getenv("OPENAI_TEXT_MODEL", "gpt-5.5"),
+            "prompt_model": analysis_model,
             "protocol": os.getenv("OPENAI_IMAGE_PROTOCOL", "auto"),
             "api_key_configured": bool(os.getenv("OPENAI_API_KEY", "").strip()),
             "image_api_key_configured": image_key_configured,
             "prompt_api_key_configured": prompt_key_configured,
+            # Analysis model provider configuration
+            "analysis_provider": analysis_provider,
+            "analysis_providers": {
+                provider_id: {
+                    "id": provider_id,
+                    "name": config["name"],
+                    "default_base_url": config["default_base_url"],
+                    "default_models": config["default_models"],
+                }
+                for provider_id, config in PROVIDER_PRESETS.items()
+            },
+            "analysis_supports_files": analysis_capabilities["supports_files"],
+            "analysis_max_file_size": analysis_capabilities["max_file_size"],
             "styles": public_styles(),
             "limits": {
                 "max_slides": MAX_SLIDES,
@@ -1418,8 +1579,8 @@ def test_api_settings() -> Response:
     if not isinstance(payload, dict):
         return jsonify({"error": "请求内容必须是 JSON"}), 400
     try:
-        target, base_url, api_key = resolve_api_settings(payload)
-        models = request_model_list(base_url, api_key)
+        target, base_url, api_key, provider = resolve_api_settings(payload)
+        models = request_model_list(base_url, api_key, provider)
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
     except Exception as exc:  # noqa: BLE001 - surface API/proxy errors in UI
@@ -1428,6 +1589,7 @@ def test_api_settings() -> Response:
         {
             "ok": True,
             "target": target,
+            "provider": provider,
             "base_url": normalize_api_base(base_url),
             "model_count": len(models),
             "models_preview": models[:12],
@@ -1441,8 +1603,8 @@ def list_api_models() -> Response:
     if not isinstance(payload, dict):
         return jsonify({"error": "请求内容必须是 JSON"}), 400
     try:
-        target, base_url, api_key = resolve_api_settings(payload)
-        models = request_model_list(base_url, api_key)
+        target, base_url, api_key, provider = resolve_api_settings(payload)
+        models = request_model_list(base_url, api_key, provider)
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
     except Exception as exc:  # noqa: BLE001 - surface API/proxy errors in UI
@@ -1450,10 +1612,41 @@ def list_api_models() -> Response:
     return jsonify(
         {
             "target": target,
+            "provider": provider,
             "base_url": normalize_api_base(base_url),
             "models": models,
         }
     )
+
+
+@app.post("/api/settings/capabilities")
+def check_model_capabilities_api() -> Response:
+    """Check model capabilities including file upload support."""
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"error": "请求内容必须是 JSON"}), 400
+
+    model_name = clean_text(payload.get("model"), 200)
+    if not model_name:
+        return jsonify({"error": "请提供模型名称"}), 400
+
+    provider = clean_text(payload.get("provider"), 20) or PROVIDER_OPENAI
+    if provider not in SUPPORTED_PROVIDERS:
+        provider = detect_provider_from_base_url(
+            payload.get("base_url", payload.get("prompt_base_url", ""))
+        )
+
+    try:
+        capabilities = check_model_capabilities(model_name, provider)
+        return jsonify(
+            {
+                "model": model_name,
+                "provider": provider,
+                **capabilities,
+            }
+        )
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"error": f"模型能力检测失败: {exc}"}), 500
 
 
 @app.get("/api/styles")

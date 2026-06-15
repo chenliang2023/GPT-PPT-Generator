@@ -306,6 +306,30 @@
     .panel-sub { margin: 5px 0 0; color: var(--muted); font-size: 12px; }
     .panel-body { padding: 20px; }
 
+    .model-capabilities {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      padding: 8px 12px;
+      background: rgba(233,248,241,0.6);
+      border-radius: 10px;
+      font-size: 12px;
+    }
+    .model-capabilities.no-files {
+      background: rgba(255,244,223,0.6);
+    }
+    .capability-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+    }
+    .capability-badge.supported {
+      color: var(--green);
+    }
+    .capability-badge.not-supported {
+      color: var(--amber);
+    }
+
     .stack { display: grid; gap: 14px; }
     .grid-2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
     .grid-3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
@@ -519,7 +543,7 @@
       border-top: 1px solid var(--line);
     }
     .modal-card {
-      width: min(780px, 100%); max-height: min(86vh, 920px); overflow: auto;
+      width: min(960px, 95%); max-height: min(90vh, 1000px); overflow: auto;
       border-radius: 24px; background: rgba(255,255,255,0.9); box-shadow: var(--shadow);
       border: 1px solid rgba(255,255,255,0.74);
     }
@@ -869,8 +893,14 @@
       </div>
       <div class="modal-body stack">
         <div class="settings-group">
-          <h3>GPT 分析</h3>
-          <div class="grid-2">
+          <h3>分析模型</h3>
+          <div class="grid-3">
+            <label>提供商
+              <select id="promptProvider">
+                <option value="openai">OpenAI</option>
+                <option value="anthropic">Anthropic</option>
+              </select>
+            </label>
             <label>Base URL
               <input id="promptBaseUrl" placeholder="https://api.openai.com/v1">
             </label>
@@ -886,8 +916,9 @@
               <option value="gpt-4.1">gpt-4.1</option>
             </select>
           </label>
+          <div id="modelCapabilities" class="model-capabilities panel-sub"></div>
           <div class="toolbar">
-            <button id="testPromptApiBtn" class="btn small" type="button">测试 GPT</button>
+            <button id="testPromptApiBtn" class="btn small" type="button">测试连接</button>
             <button id="fetchPromptModelsBtn" class="btn small" type="button">拉取模型</button>
             <span id="promptApiStatus" class="panel-sub"></span>
           </div>
@@ -1017,6 +1048,7 @@
     const $ = (id) => document.getElementById(id);
     const SETTINGS_STORAGE_KEY = "image2ppt-api-settings";
     const SAVED_SETTING_IDS = [
+      "promptProvider",
       "promptBaseUrl",
       "promptApiKey",
       "imageBaseUrl",
@@ -1114,6 +1146,16 @@
     function applySavedSettings() {
       const saved = readSavedSettings();
       SAVED_SETTING_IDS.forEach((id) => setFieldValue(id, saved[id]));
+      // Don't trigger provider change on restore - just sync the UI dropdown
+      // The Base URL is already set, so we just update the provider dropdown to match
+      if (saved.promptBaseUrl) {
+        const detectedProvider = detectProviderFromUrl(saved.promptBaseUrl);
+        setSelectValue("promptProvider", detectedProvider);
+      }
+      // Update model capabilities after restoring settings
+      if (saved.promptModel) {
+        updateModelCapabilities();
+      }
     }
 
     function collectSavedSettings() {
@@ -1208,6 +1250,8 @@
       try {
         const response = await fetch("/api/config");
         const config = await response.json();
+        // Load analysis model provider settings
+        setSelectValue("promptProvider", config.analysis_provider || "openai");
         $("promptBaseUrl").value = config.prompt_base_url || config.base_url || "https://api.openai.com/v1";
         $("imageBaseUrl").value = config.image_base_url || config.base_url || "https://api.openai.com/v1";
         setSelectValue("imageModel", config.model || "gpt-image-2");
@@ -1222,6 +1266,7 @@
         state.styles = Array.isArray(config.styles) ? config.styles : [];
         renderStyleSelect();
         setConfigStatus();
+        updateModelCapabilities();
       } catch (error) {
         toast(`配置读取失败：${error.message}`);
       }
@@ -1252,7 +1297,7 @@
 
     function apiSettingsPayload(target) {
       const isPrompt = target === "prompt";
-      return {
+      const payload = {
         target,
         api_key: (isPrompt ? $("promptApiKey") : $("imageApiKey")).value.trim(),
         base_url: (isPrompt ? $("promptBaseUrl") : $("imageBaseUrl")).value.trim(),
@@ -1261,6 +1306,12 @@
         image_api_key: $("imageApiKey").value.trim(),
         image_base_url: $("imageBaseUrl").value.trim(),
       };
+      if (isPrompt) {
+        // Auto-detect provider from Base URL for API calls
+        const baseUrl = $("promptBaseUrl").value.trim();
+        payload.provider = detectProviderFromUrl(baseUrl);
+      }
+      return payload;
     }
 
     function setApiStatus(target, message) {
@@ -1292,8 +1343,11 @@
         });
         const result = await response.json();
         if (!response.ok) throw new Error(result.error || "API 测试失败");
-        setApiStatus(target, `连接正常，识别到 ${result.model_count || 0} 个模型`);
-        toast(target === "prompt" ? "GPT API 测试通过" : "Image API 测试通过");
+        const providerInfo = target === "prompt" && result.provider
+          ? ` (${result.provider === "anthropic" ? "Anthropic" : "OpenAI"})`
+          : "";
+        setApiStatus(target, `连接正常${providerInfo}，识别到 ${result.model_count || 0} 个模型`);
+        toast(target === "prompt" ? "分析模型 API 测试通过" : "Image API 测试通过");
       } catch (error) {
         setApiStatus(target, error.message);
         toast(error.message);
@@ -1319,12 +1373,89 @@
         if (!models.length) throw new Error("模型列表为空");
         fillModelSelect(isPrompt ? "promptModel" : "imageModel", models);
         setApiStatus(target, `已拉取 ${models.length} 个模型`);
+        if (isPrompt) updateModelCapabilities();
         toast("模型列表已更新");
       } catch (error) {
         setApiStatus(target, error.message);
         toast(error.message);
       } finally {
         btn.disabled = false;
+      }
+    }
+
+    // Provider and model capabilities functions
+    const PROVIDER_PRESETS = {
+      openai: {
+        name: "OpenAI官方",
+        baseUrl: "https://api.openai.com/v1",
+        models: ["gpt-5.5", "gpt-5.1", "gpt-5", "gpt-4.1", "gpt-4o", "gpt-4o-mini"],
+      },
+      anthropic: {
+        name: "Anthropic官方",
+        baseUrl: "https://api.anthropic.com/v1",
+        models: ["claude-3-5-sonnet-20241022", "claude-3-5-haiku-20241022", "claude-3-opus-20240229"],
+      },
+    };
+
+    function handleProviderChange() {
+      const provider = $("promptProvider").value;
+      const preset = PROVIDER_PRESETS[provider];
+      if (preset) {
+        $("promptBaseUrl").value = preset.baseUrl;
+        // Only fill model list if it's a known preset provider
+        // Don't overwrite custom URLs
+        const currentUrl = $("promptBaseUrl").value;
+        if (currentUrl === preset.baseUrl) {
+          fillModelSelect("promptModel", preset.models);
+        }
+        updateModelCapabilities();
+      }
+      saveSettings(false);
+    }
+
+    function detectProviderFromUrl(url) {
+      const normalized = url.toLowerCase();
+      if (normalized.includes("anthropic")) return "anthropic";
+      if (normalized.includes("deepseek")) return "openai";  // DeepSeek uses OpenAI-compatible API
+      return "openai";  // Default to OpenAI for custom endpoints
+    }
+
+    async function updateModelCapabilities() {
+      const baseUrl = $("promptBaseUrl").value;
+      const model = $("promptModel").value;
+      // Auto-detect provider from URL for capability check
+      const provider = detectProviderFromUrl(baseUrl);
+      const capabilitiesEl = $("modelCapabilities");
+
+      if (!model) {
+        capabilitiesEl.innerHTML = "";
+        return;
+      }
+
+      try {
+        const response = await fetch("/api/settings/capabilities", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            provider,
+            model,
+            base_url: baseUrl,
+          }),
+        });
+        const result = await response.json();
+
+        const supportsFiles = result.supports_files || false;
+        const maxFileSize = result.max_file_size ? (result.max_file_size / 1000000).toFixed(0) : 0;
+
+        capabilitiesEl.className = `model-capabilities ${supportsFiles ? "supports-files" : "no-files"}`;
+        capabilitiesEl.innerHTML = `
+          <span class="capability-badge ${supportsFiles ? "supported" : "not-supported"}">
+            ${supportsFiles ? "✓" : "✗"} 支持文件上传
+          </span>
+          ${maxFileSize ? `<span>最大 ${maxFileSize}MB</span>` : ""}
+        `;
+      } catch (error) {
+        capabilitiesEl.innerHTML = `<span class="capability-badge not-supported">能力检测失败</span>`;
       }
     }
 
@@ -2031,6 +2162,9 @@
       $("fetchPromptModelsBtn").addEventListener("click", () => fetchModels("prompt"));
       $("testImageApiBtn").addEventListener("click", () => testApi("image"));
       $("fetchImageModelsBtn").addEventListener("click", () => fetchModels("image"));
+      // Analysis model provider event listeners
+      $("promptProvider").addEventListener("change", handleProviderChange);
+      $("promptModel").addEventListener("change", updateModelCapabilities);
       $("languageSelect").addEventListener("change", updateLanguageVisibility);
       $("slideCount").addEventListener("input", updateBriefSummary);
       $("referenceFiles").addEventListener("change", (event) => {
