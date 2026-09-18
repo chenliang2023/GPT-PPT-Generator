@@ -92,7 +92,7 @@ flowchart LR
 | [002] warning+continue | #7 | Pi | ✅ done 已合并（验收标准 2 的测试已豁免） |
 | [004] spec-format 扩展 | #13 | Claude | 🔍 review，已实测验证（482 行、原文 0 行丢失），待 Merge |
 | [003] CLI + `--template` | #12 | Pi | 🔍 review，已实测验证（7/7 含 D1/D2），待 Merge |
-| [005] fixture + SKILL.md | #14 | Claude | ⏳ todo（前置门禁：等 [003] 合并后点 Start） |
+| [005] fixture + SKILL.md | #16 | Claude | ⏳ todo，等你点 Start（取代作废的 #14；含 D1/D2 回归用例，阻塞已解除） |
 | [006] skills-lock 注册 | #15 | Pi | ⏳ todo（前置门禁：等 [005] 合并后点 Start） |
 
 **首批卡片曾于 10:47 被整体取消**：#8/#9/#10/#11 在建成后 8–17 秒被 `auto_process` 自动领取并开跑，随后在面板上被逐个取消（`work_task_event.actor = user`）。4 个 worktree 均为干净状态（停在 `da39bfc`，无半成品），故 10:55 直接以新卡重建（#12–#15）。
