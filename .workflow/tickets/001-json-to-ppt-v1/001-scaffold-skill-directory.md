@@ -35,7 +35,7 @@ Pi
 `ticket/001-scaffold-skill-directory`
 
 ## 🧭 上下文
-- 工作区根：`c:\Users\Windows\Desktop\Task\ongoing\GPT-PPT-Generator\`
+- 工作区根：**仓库根目录**（在哪个 agent 上跑就用哪边的根，不要把它写进产物里）
 - 参考结构：`skills/images-to-editable-pptx/`（已有 `SKILL.md`、`scripts/`、`references/`、`agents/` 四件套）
 - 这个 ticket **只**创建目录结构，不写任何真实文件内容（后续 ticket 会各自填）
 - 不要新建 `tests/` 子目录——测试在仓库根的 `tests/` 目录，由 T005 负责
