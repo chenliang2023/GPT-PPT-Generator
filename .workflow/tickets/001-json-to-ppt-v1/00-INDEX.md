@@ -69,6 +69,19 @@ flowchart LR
 
 并发上限 3 → W1a 跑 T001 + T002（并行，改的文件不重叠：001 新建 `skills/json-to-ppt/`，002 改旧 `build_editable_pptx.py`）；W1b 跑 T003 + T004（并行）；W2 单跑 T005；W3 单跑 T006。
 
+## 环境前提（2026-09-18 修好）
+
+派发后第一轮暴露出的环境缺口，已在本机（服务器 CodeG）修掉：
+
+| 缺口 | 症状 | 处置 |
+|:--|:--|:--|
+| `python` 命令不存在（只有 `python3`） | preflight `python -m pytest` exit 127，所有验收命令失效 | `ln -s /usr/bin/python3 /usr/local/bin/python` |
+| 项目依赖全缺（pytest / python-pptx / flask / requests / Pillow） | 即便有 `python` 也 import 失败 | `pip3 install -r requirements-dev.txt` |
+
+验证：仓库根 `python -m pytest -q` → `22 passed`，exit 0。
+
+未修（不影响任务）：服务器侧 git 无 `user.name`/`user.email`，提交作者退化为 `root@<主机名>`；`git push` 需显式带 CodeG 的 credential helper。
+
 ## 状态行与阻塞边口径
 
 - 每张 ticket 文件首行是状态行 `<!-- status: todo -->`；`/dispatch` 靠它扫未完成 ticket，派发后改成 `<!-- status: dispatched to:<agent> via:codeg-todos at:<时间> -->`，合并后改 `done`

@@ -37,6 +37,11 @@ Pi
 ## 🌿 分支
 `ticket/003-build-pptx-cli-shell-with-template`
 
+## 🏃 执行约定
+- **直接动手，不要先出计划等确认**——本 ticket 已定稿，实现 → 跑验收命令 → 提交，一次做完
+- 分支由 CodeG 管理（`task/<id>`）：不要自建分支、不要 push、不要改 `.workflow/`
+- 验收命令必须真跑，并把**实际输出**贴回结果；跑不起来就直说，不要声称通过
+
 ## 🧭 上下文
 - 复用的库函数：`skills/images-to-editable-pptx/scripts/build_editable_pptx.py:478` 的 `build_pptx(spec, output_path, base_dir, allow_full_bleed_images=False)`
 - 模板加载：`from pptx import Presentation; tpl = Presentation(template_path)`

@@ -36,6 +36,11 @@ Claude
 ## 🌿 分支
 `ticket/004-extend-spec-format`
 
+## 🏃 执行约定
+- **直接动手，不要先出计划等确认**——本 ticket 已定稿，实现 → 跑验收命令 → 提交，一次做完
+- 分支由 CodeG 管理（`task/<id>`）：不要自建分支、不要 push、不要改 `.workflow/`
+- 验收命令必须真跑，并把**实际输出**贴回结果；跑不起来就直说，不要声称通过
+
 ## 🧭 上下文
 - 原文：[`skills/images-to-editable-pptx/references/spec-format.md`](../../skills/images-to-editable-pptx/references/spec-format.md)（约 130 行）
 - 「超集」实现方式有两条：
