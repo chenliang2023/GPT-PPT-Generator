@@ -10,17 +10,19 @@
 
 现在没有这个 CLI；新 skill 还没有渲染入口。任务完成后：
 
-- `python skills/json-to-ppt/scripts/build_pptx.py spec.json out.pptx` 正常工作（无模板 = 从空白起）
-- `python skills/json-to-ppt/scripts/build_pptx.py spec.json out.pptx --template base.pptx` 把生成的 slide 追加到 base.pptx 已有的 slide 之后
-- **不修改** `images-to-editable-pptx` 的任何文件
+- `python skills/json-to-ppt/scripts/build_pptx.py --spec spec.json --out out.pptx` 正常工作（无模板 = 从空白起）
+- `python skills/json-to-ppt/scripts/build_pptx.py --spec spec.json --out out.pptx --template base.pptx` 把生成的 slide 追加到 base.pptx 已有的 slide 之后
+- **不修改** `images-to-editable-pptx` 的任何文件（例外：D1 明示放开的尺寸那一段，见下方「已拍板的设计约束」）
 - 模板的母版/配色/layouts 被保留（因为 `Presentation(template_path)` 复用其 slide_master）
 
 ## ✅ 验收标准
-1. `python skills/json-to-ppt/scripts/build_pptx.py tests/fixtures/spec-text-only.json /tmp/out.pptx` 成功生成
+1. `python skills/json-to-ppt/scripts/build_pptx.py --spec tests/fixtures/spec-text-only.json --out /tmp/out.pptx` 成功生成
 2. `--template` 用一个含 2 张空 slide 的 fixture：生成的 PPTX 有「模板原有 slide 数 + spec 中 slide 数」张
 3. **不传** `--template` 时，PPTX 的 slide 数 = spec 中 slide 数（行为等同 T002 完成后的旧 CLI）
 4. `--template` 指向不存在文件时，CLI 退出非零，stderr 含 `template`
 5. `python -c "from pptx import Presentation; p=Presentation('/tmp/out.pptx'); print(len(p.slides))"` 能解析生成的 PPTX
+6. **模板尺寸不被冲掉**（D1）：拿一个非默认尺寸的模板（如 10×7.5in）跑 `--template`，读回输出断言 `slide_width/slide_height` 与模板**逐值相等**
+7. **版式选择不崩**（D2）：拿一个版式数很少、或版式名里没有 `blank` 的模板跑 `--template`，断言 CLI 不抛栈回溯——要么挑到空白版式正常出片，要么明确报错并以非零退出
 
 ## 🧪 测试 seam
 - shell：直接跑 CLI 命令并断言 exit code、slide 数
@@ -41,6 +43,30 @@ Pi
 - **直接动手，不要先出计划等确认**——本 ticket 已定稿，实现 → 跑验收命令 → 提交，一次做完
 - 分支由 CodeG 管理（`task/<id>`）：不要自建分支、不要 push、不要改 `.workflow/`
 - 验收命令必须真跑，并把**实际输出**贴回结果；跑不起来就直说，不要声称通过
+
+## 🧷 已拍板的设计约束（2026-09-18 派发后补，T002 实测暴露）
+
+三条都必须在 T003 落地，验收标准 6/7 分别盯 D1 和 D2。
+
+**D1 · `--template` 模式下模板尺寸优先**
+
+`build_editable_pptx.py:502-503` 无条件执行 `presentation.slide_width/height = inches(...)`，会把模板尺寸冲掉。实测证据：10×7.5in 模板传入后，输出变成 **13.333×7.5in**——尺寸被改了，「模板原样保留」并不成立。
+
+- 规则：传了 `--template` 就以**模板尺寸为准**；spec 显式声明的 `slide_size` 与模板不一致时，忽略 spec 并在 stderr 给一条 warning
+- 实现二选一：**推荐**给 `build_pptx()` 再加 `preserve_slide_size: bool = False`，CLI 传 `True`（语义显式）；**允许**在 `existing_presentation is not None` 时跳过尺寸覆盖（少一个参数，但隐式）
+- 因此本 ticket **允许动** `build_editable_pptx.py` 里尺寸那一段（原「不修改旧文件」只在此处放宽，其余部分仍不碰）
+
+**D2 · 不得盲目用 `slide_layouts[6]`**
+
+`build_editable_pptx.py:505` 硬编码 `blank_layout = presentation.slide_layouts[6]`。模板的版式数量与顺序各不相同，索引 6 未必是空白版式；模板版式少于 7 个时还会直接 IndexError 崩掉。
+
+- 规则：模板模式下按**名称**挑空白版式（匹配 `blank` / `空白`，大小写不敏感）；挑不到再退回索引 6，但索引越界时必须给**明确报错并非零退出**，不允许栈回溯
+
+**D3 · CLI 参数口径统一为 `--spec/--out`**
+
+旧 CLI 是 `--spec <file> --out <file>`，本 ticket 原先的验收命令写成了位置参数，已全部改正。`--template` 作为可选参数追加。
+
+---
 
 ## 🧭 上下文
 - 复用的库函数：`skills/images-to-editable-pptx/scripts/build_editable_pptx.py:478` 的 `build_pptx(spec, output_path, base_dir, allow_full_bleed_images=False)`

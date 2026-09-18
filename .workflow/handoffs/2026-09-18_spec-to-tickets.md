@@ -90,6 +90,20 @@
 
 6 张 ticket 首行补上 `<!-- status: todo -->`——`/dispatch` 第 1 步靠这行扫未完成 ticket，此前只能手抄 INDEX 的分派清单。
 
+#### T003 追加三条设计约束 D1/D2/D3（2026-09-18，T002 落地后实测）
+
+T002（warning + continue + `existing_presentation`）实测后发现，只加 `existing_presentation` 不足以让 `--template` 真的"保留模板"：
+
+- **D1 模板尺寸优先**：`build_editable_pptx.py:502-503` 无条件覆盖 `slide_width/height`——实测 10×7.5in 模板传入后输出变成 13.333×7.5in。规则：模板模式以模板尺寸为准，spec 的 `slide_size` 不一致时忽略并 warning。T003 的「不修改旧文件」约束在此处放宽。
+- **D2 版式选择**：`build_editable_pptx.py:505` 硬编码 `slide_layouts[6]`，模板版式少于此数会 IndexError。规则：按名称挑 `blank`/`空白`，挑不到退回索引 6，越界必须明确报错非零退出。
+- **D3 参数口径**：统一 `--spec/--out`，`--template` 为可选追加项；T003 原验收命令误写的位置参数已改正。
+
+三条已写入 [003 的「🧷 已拍板的设计约束」](../tickets/001-json-to-ppt-v1/003-build-pptx-cli-shell-with-template.md) 并反映到验收标准 6/7，INDEX 的「派发后追加的三条约束」与之互为冗余。
+
+#### 已知豁免（2026-09-18）
+
+T002 的验收标准 2（在 `tests/test_editable_pptx_skill.py` 加坏元素端到端测试）**未做且经确认不补**：代码行为已由人工实测覆盖（坏元素 → exit 0 + stderr `Slide 1 element 1` + 后续元素照常渲染），但仓库里没有对应的回归测试。T003 会继续改同一个函数，此处无自动化防护网。
+
 ---
 
 ## 拓扑与依赖（本批次锁定）

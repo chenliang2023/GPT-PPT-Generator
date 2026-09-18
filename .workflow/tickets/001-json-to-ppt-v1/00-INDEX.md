@@ -101,6 +101,18 @@ flowchart LR
 2. **T002 与 T003 串行**：T002 PR 落库后 T003 才能开工——已在拓扑图里体现（T003 在 W2，紧跟 W1b 的 T002）。
 3. **PR 合并策略**：建议 T002 和 T003 拆 PR，但 T003 PR 必须 `git rebase` 到 T002 之后；如果合并冲突难解，合并为一个 PR 也可。
 
+### 派发后追加的三条约束（2026-09-18，T002 实测暴露）
+
+T002 落地后实测发现，光有 `existing_presentation` 还不够——已写进 [003 的「🧷 已拍板的设计约束」](./003-build-pptx-cli-shell-with-template.md#-已拍板的设计约束2026-09-18-派发后补t002-实测暴露)：
+
+| 编号 | 约束 | 证据 |
+|:--|:--|:--|
+| D1 | `--template` 模式下**模板尺寸优先**，spec 的 `slide_size` 不一致时忽略并 warning | `build_editable_pptx.py:502-503` 无条件覆盖尺寸；实测 10×7.5in 模板 → 输出 13.333×7.5in |
+| D2 | 不得盲目用 `slide_layouts[6]`；按名称挑空白版式，越界要明确报错非零退出 | `build_editable_pptx.py:505` 硬编码索引 6 |
+| D3 | CLI 参数口径统一 `--spec/--out`（`--template` 为可选追加项） | 旧 CLI 与旧 SKILL.md 都是 `--spec/--out`；T003 原验收命令误写为位置参数。spec 里那两处位置参数写法也已同步修订（见 spec 末尾「修订记录」） |
+
+D1 同时放宽了 T003「不修改 `images-to-editable-pptx` 任何文件」的约束——尺寸那一段允许改。
+
 ## Ticket 清单
 
 | ID | 文件 | Agent | 关键产出 |

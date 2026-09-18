@@ -16,7 +16,7 @@
 
 - 📥 输入：单个 JSON spec 文件（按新 `references/spec-format.md` 扩展版定义）
 - 📤 输出：原生可编辑 `.pptx`
-- ⚙️ 调用方式：CLI 命令 `python scripts/build_pptx.py spec.json output.pptx [--template <file.pptx>]`
+- ⚙️ 调用方式：CLI 命令 `python scripts/build_pptx.py --spec spec.json --out output.pptx [--template <file.pptx>]`<sup>[1]</sup>
 - 🔧 渲染引擎：python-pptx（已验证可行，见 [json-to-ppt-landscape.md](research/json-to-ppt-landscape.md)）
 - 🧱 支持的元素类型：text、shape、line、table、bar_chart、image（防护性拒绝全页源图）
 - 🚫 v1 不带 `--validate`：渲染失败以 warning 形式输出，CLI 自身硬错才非零退出
@@ -76,7 +76,7 @@ flowchart LR
 
 ## 🧪 测试决策
 
-- **测试 seam**：CLI 端到端（`scripts/build_pptx.py spec.json out.pptx`）。**只测外部行为**：能否打开生成的 PPTX、幻灯片数量、元素类型是否符合预期、文字是否可编辑。不测 python-pptx 内部 API。
+- **测试 seam**：CLI 端到端（`scripts/build_pptx.py --spec spec.json --out out.pptx`）<sup>[1]</sup>。**只测外部行为**：能否打开生成的 PPTX、幻灯片数量、元素类型是否符合预期、文字是否可编辑。不测 python-pptx 内部 API。
 - **测试 fixture**：用 `tests/fixtures/` 下的若干 JSON spec 样本（覆盖：纯文字、多元素组合、表格、含模板路径）。每个 fixture 对应一个 expected.pptx 断言文件。
 - **不写视觉回归测试**：第一版不做像素级对比（python-pptx 输出在不同 Office 版本下像素可能略有差异），只测结构（元素类型、坐标、文字内容）。
 - **测试先例**：`tests/test_editable_pptx_skill.py` 已有对 `build_editable_pptx.py` 的端到端测试，新 skill 的测试结构和它对齐。
@@ -99,3 +99,9 @@ flowchart LR
 - 本 spec 与 [gpt-ppt-generator-as-skill.md](research/gpt-ppt-generator-as-skill.md) 调研结论一致：JSON → PPTX 是 skill 拆分的明确子模块。
 - 渲染层的代码 80% 复用自 `images-to-editable-pptx/scripts/build_editable_pptx.py`，新 skill 主要工作在 CLI 入口 + 模板参数 + schema 扩展。
 - 第一版完成后，下一步可以建 `markdown-to-json-ppt` skill（接受 Markdown 输入，调用 LLM 生成 JSON spec，再调本 skill 渲染）。
+
+---
+
+## 📝 修订记录
+
+<sup>[1]</sup> **2026-09-18 · CLI 参数口径**：原文写的是位置参数（`build_pptx.py spec.json output.pptx`），与仓库既有 CLI（`build_editable_pptx.py --spec --out`，见其 SKILL.md 的 Build 段）以及本批次 [T005 的验收标准 5](../tickets/001-json-to-ppt-v1/005-test-fixtures-and-skill-md.md) 都不一致。统一为 `--spec/--out`，`--template` 作为可选追加参数。此改动为文档对齐，不改设计意图。
