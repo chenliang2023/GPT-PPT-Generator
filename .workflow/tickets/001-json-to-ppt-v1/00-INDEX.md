@@ -45,7 +45,7 @@ flowchart LR
 - `T002` 和 `T003` **都改 `build_editable_pptx.py`**——`T003` 走「给 `build_pptx()` 加 `existing_presentation` 参数」路线时，`T002` 的 warning 路径必须先就位
 - 建议做法：T002 + T003 同 PR（先 T002 落地，T003 紧跟），或 T003 在 T002 PR 之上继续
 - T004 只写 `skills/json-to-ppt/references/spec-format.md`，跟旧 skill 内容零交集；但它落在 [001] 新建的目录里，所以阻塞 [001]。等 [001] 合并后可与 [003] 并行，不占 W2 槽位
-- T001 只新建目录 + 占位 `SKILL.md`。注意 git 不追踪空目录，[001] 真正的可提交产物是 `skills/json-to-ppt/SKILL.md`；`scripts/`、`references/`、`agents/` 三个空目录要靠各自 ticket 写文件时落地
+- T001 除占位 `SKILL.md` 外还要在三个子目录放空的 `.gitkeep`（git 不追踪空目录，缺了它脚手架合并后会消失）。T001 的验收标准已含 `git ls-files skills/json-to-ppt | wc -l` = 4
 
 ## 分派清单（可直接复制进 CodeG）
 
