@@ -1,4 +1,4 @@
-<!-- status: todo -->
+<!-- status: dispatched to:pi via:codeg-todos at:2026-09-18T09:51:49+08:00 task:#7 -->
 
 # [002] 失败即 warning，不阻断渲染
 
