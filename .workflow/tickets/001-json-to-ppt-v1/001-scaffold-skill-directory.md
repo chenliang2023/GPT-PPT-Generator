@@ -1,4 +1,4 @@
-<!-- status: dispatched to:pi via:codeg-todos at:2026-09-18T09:51:49+08:00 task:#6 running -->
+<!-- status: done task:#6 merged -->
 
 # [001] scaffold `skills/json-to-ppt/` directory
 

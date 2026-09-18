@@ -1,4 +1,4 @@
-<!-- status: dispatched to:pi via:codeg-todos at:2026-09-18T09:51:49+08:00 task:#7 in_review 代码已完成（e9dd00f）；验收标准 2 的测试经确认不补，豁免记录见 handoff -->
+<!-- status: done task:#7 merged 验收标准 2 的测试已豁免（见 handoff） -->
 
 # [002] 失败即 warning，不阻断渲染
 
