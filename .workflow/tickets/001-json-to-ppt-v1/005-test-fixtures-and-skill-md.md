@@ -1,4 +1,4 @@
-<!-- status: todo -->
+<!-- status: dispatched to:claude_code via:codeg-todos at:2026-09-18T10:47:05+08:00 task:#10 前置门禁：等 [003] 合并后才真正开工 -->
 
 # [005] 测试 fixture + 端到端测试 + 新 SKILL.md
 

@@ -82,6 +82,21 @@ flowchart LR
 
 未修（不影响任务）：服务器侧 git 无 `user.name`/`user.email`，提交作者退化为 `root@<主机名>`；`git push` 需显式带 CodeG 的 credential helper。
 
+## CodeG 任务对照表
+
+全 6 张 ticket 已建为 CodeG To-dos（folder GPT-PPT-Generator），`auto_process` 开启时会自动按 sort_order 领取：
+
+| ticket | CodeG task | Agent | 状态（截至 2026-09-18 10:47） |
+|:--|:--|:--|:--|
+| [001] scaffold | #6 | Pi | ✅ done 已合并 |
+| [002] warning+continue | #7 | Pi | ✅ done 已合并（验收标准 2 的测试已豁免） |
+| [004] spec-format 扩展 | #8 | Claude | 🔄 running |
+| [003] CLI + `--template` | #9 | Pi | 🔄 running |
+| [005] fixture + SKILL.md | #10 | Claude | 🔄 running（前置门禁：会因 [003] 未合并而自停，等 #9 合并后重跑） |
+| [006] skills-lock 注册 | #11 | Pi | ⏳ queued（前置门禁：等 [005]） |
+
+`005` 与 `006` 的任务描述里各有一段**前置门禁**：开工前先检查上游产物是否存在，不满足就直接回「被阻塞，未开始」并结束。这是为了在自动领取（auto_process）下避免抢跑——代价是被拦下的那轮任务会以"零改动"落进 Review，等上游合并后重跑即可。
+
 ## 状态行与阻塞边口径
 
 - 每张 ticket 文件首行是状态行 `<!-- status: todo -->`；`/dispatch` 靠它扫未完成 ticket，派发后改成 `<!-- status: dispatched to:<agent> via:codeg-todos at:<时间> -->`，合并后改 `done`

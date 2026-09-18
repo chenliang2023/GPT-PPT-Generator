@@ -1,4 +1,4 @@
-<!-- status: todo -->
+<!-- status: dispatched to:pi via:codeg-todos at:2026-09-18T10:47:05+08:00 task:#9 -->
 
 # [003] 新建 `build_pptx.py` CLI 入口（薄壳 + `--template`）
 

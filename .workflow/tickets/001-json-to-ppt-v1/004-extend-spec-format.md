@@ -1,4 +1,4 @@
-<!-- status: todo -->
+<!-- status: dispatched to:claude_code via:codeg-todos at:2026-09-18T10:47:05+08:00 task:#8 -->
 
 # [004] 扩展 `spec-format.md`（template 字段 + slide_size 描述）
 
