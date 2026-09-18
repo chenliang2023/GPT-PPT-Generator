@@ -4,6 +4,7 @@ import argparse
 import json
 import math
 import re
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -480,6 +481,7 @@ def build_pptx(
     output_path: Path,
     base_dir: Path,
     allow_full_bleed_images: bool = False,
+    existing_presentation: Presentation | None = None,
 ) -> Path:
     slides = spec.get("slides")
     if not isinstance(slides, list) or not slides:
@@ -492,7 +494,11 @@ def build_pptx(
     theme = spec.get("theme") if isinstance(spec.get("theme"), dict) else {}
     source_images = resolve_source_images(spec, base_dir)
 
-    presentation = Presentation()
+    presentation = (
+        existing_presentation
+        if existing_presentation is not None
+        else Presentation()
+    )
     presentation.slide_width = inches(slide_width)
     presentation.slide_height = inches(slide_height)
     presentation.core_properties.title = str(spec.get("title") or output_path.stem)
@@ -509,12 +515,12 @@ def build_pptx(
             raise ValueError(f"Slide {slide_index} elements must be a list")
 
         for element_index, element in enumerate(elements, start=1):
-            if not isinstance(element, dict):
-                raise ValueError(
-                    f"Slide {slide_index} element {element_index} must be an object"
-                )
-            element_type = str(element.get("type") or "")
             try:
+                if not isinstance(element, dict):
+                    raise ValueError(
+                        f"Slide {slide_index} element {element_index} must be an object"
+                    )
+                element_type = str(element.get("type") or "")
                 if element_type == "text":
                     add_text(slide, element, theme)
                 elif element_type == "shape":
@@ -539,9 +545,10 @@ def build_pptx(
                 else:
                     raise ValueError(f"Unsupported element type: {element_type}")
             except Exception as exc:
-                raise ValueError(
-                    f"Slide {slide_index} element {element_index} failed: {exc}"
-                ) from exc
+                print(
+                    f"Warning: Slide {slide_index} element {element_index} failed: {exc}",
+                    file=sys.stderr,
+                )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     presentation.save(output_path)
@@ -557,13 +564,25 @@ def main() -> int:
     parser.add_argument("--allow-full-bleed-images", action="store_true")
     args = parser.parse_args()
 
-    spec = json.loads(args.spec.read_text(encoding="utf-8"))
-    build_pptx(
-        spec=spec,
-        output_path=args.out,
-        base_dir=args.spec.parent,
-        allow_full_bleed_images=args.allow_full_bleed_images,
-    )
+    try:
+        spec = json.loads(args.spec.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        print(f"JSON parse failed: {exc}", file=sys.stderr)
+        return 1
+    except OSError as exc:
+        print(f"Unable to read spec: {exc}", file=sys.stderr)
+        return 1
+
+    try:
+        build_pptx(
+            spec=spec,
+            output_path=args.out,
+            base_dir=args.spec.parent,
+            allow_full_bleed_images=args.allow_full_bleed_images,
+        )
+    except OSError as exc:
+        print(f"Unable to write output: {exc}", file=sys.stderr)
+        return 1
     print(f"Created editable PPTX: {args.out}")
     return 0
 
