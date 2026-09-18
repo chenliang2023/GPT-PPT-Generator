@@ -1,3 +1,5 @@
+<!-- status: todo -->
+
 # [002] 失败即 warning，不阻断渲染
 
 ## 📌 Spec 引用

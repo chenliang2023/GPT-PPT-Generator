@@ -19,24 +19,24 @@
 flowchart LR
   subgraph W1a["W1a · 可立即开始"]
     T001["[001] scaffold 目录<br/>Pi"]
-    T004["[004] spec-format 扩展<br/>Claude"]
-  end
-  subgraph W1b["W1b · 等待 W1a"]
     T002["[002] warning+continue<br/>Pi"]
   end
-  subgraph W2["W2 · 等待 W1b"]
+  subgraph W1b["W1b · 等待 [001]（[003] 另需 [002]）"]
+    T004["[004] spec-format 扩展<br/>Claude"]
     T003["[003] build_pptx.py CLI<br/>Pi"]
   end
-  subgraph W3["W3 · 等待 W2"]
+  subgraph W2["W2 · 等待 [003]"]
     T005["[005] fixture + SKILL.md<br/>Claude"]
+  end
+  subgraph W3["W3 · 等待 [005]"]
     T006["[006] skills-lock 注册<br/>Pi"]
   end
-  T001 --> T002
   T001 --> T003
+  T001 --> T004
   T001 --> T005
   T002 --> T003
+  T002 --> T005
   T003 --> T005
-  T004 -.不依赖任何.-> W3
   T005 --> T006
 ```
 
@@ -44,27 +44,37 @@ flowchart LR
 
 - `T002` 和 `T003` **都改 `build_editable_pptx.py`**——`T003` 走「给 `build_pptx()` 加 `existing_presentation` 参数」路线时，`T002` 的 warning 路径必须先就位
 - 建议做法：T002 + T003 同 PR（先 T002 落地，T003 紧跟），或 T003 在 T002 PR 之上继续
-- T004 跟旧 skill 完全无交集，可以和 W1a/W1b 并行跑，不占 W2 槽位
+- T004 只写 `skills/json-to-ppt/references/spec-format.md`，跟旧 skill 内容零交集；但它落在 [001] 新建的目录里，所以阻塞 [001]。等 [001] 合并后可与 [003] 并行，不占 W2 槽位
+- T001 只新建目录 + 占位 `SKILL.md`。注意 git 不追踪空目录，[001] 真正的可提交产物是 `skills/json-to-ppt/SKILL.md`；`scripts/`、`references/`、`agents/` 三个空目录要靠各自 ticket 写文件时落地
 
 ## 分派清单（可直接复制进 CodeG）
 
 ```markdown
 🟢 可立即开始
 - [001] scaffold skills/json-to-ppt/ → Pi
-- [004] spec-format.md 扩展 → Claude
-
-🟡 等待 [001]
 - [002] warning+continue 错误路径 → Pi
 
-🟠 等待 [002]
+🟡 等待 [001]
+- [004] spec-format.md 扩展 → Claude
+
+🟠 等待 [001] + [002]
 - [003] build_pptx.py CLI + --template → Pi  （走选项 a：T002 同步加 `existing_presentation` 参数）
 
 🔴 等待 [003]
 - [005] fixture + SKILL.md → Claude
+
+⚫ 等待 [005]
 - [006] skills-lock.json 注册 → Pi
 ```
 
-并发上限 3 → W1a 跑 T001 + T004（并行）；W2 单跑 T003（依赖 T002）；W3 三路串行收尾。
+并发上限 3 → W1a 跑 T001 + T002（并行，改的文件不重叠：001 新建 `skills/json-to-ppt/`，002 改旧 `build_editable_pptx.py`）；W1b 跑 T003 + T004（并行）；W2 单跑 T005；W3 单跑 T006。
+
+## 状态行与阻塞边口径
+
+- 每张 ticket 文件首行是状态行 `<!-- status: todo -->`；`/dispatch` 靠它扫未完成 ticket，派发后改成 `<!-- status: dispatched to:<agent> via:codeg-todos at:<时间> -->`，合并后改 `done`
+- **阻塞边以各 ticket 自己的「🚧 阻塞」段为唯一口径**，本 INDEX 与 [spec→tickets handoff](../../handoffs/2026-09-18_spec-to-tickets.md) 的拓扑图与之一致
+- 2026-09-18 修正两处旧不一致：删掉 `T001 → T002` 边（T002 只改旧 skill，不依赖新目录）；加上 `T001 → T004` 边（T004 要写进 `references/`）
+- 本 INDEX 不是 ticket，没有状态行，不参与 `/dispatch` 扫描
 
 ## T003 决策（已拍板）
 

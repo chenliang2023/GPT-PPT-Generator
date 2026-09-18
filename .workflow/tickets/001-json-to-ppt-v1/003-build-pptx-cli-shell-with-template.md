@@ -1,3 +1,5 @@
+<!-- status: todo -->
+
 # [003] 新建 `build_pptx.py` CLI 入口（薄壳 + `--template`）
 
 ## 📌 Spec 引用

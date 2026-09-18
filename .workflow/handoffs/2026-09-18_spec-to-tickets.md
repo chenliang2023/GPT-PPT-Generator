@@ -75,6 +75,21 @@
 - **建议加第 5 个**：含坏元素（验证 Q4 warning 行为）
 - 决策时点：T005 开工时拍板
 
+#### 阻塞边口径统一（2026-09-18 修订，派发前）
+
+派发前扫出 INDEX 与 ticket 文件两处阻塞边不一致，已统一到「**ticket 自己的 `## 🚧 阻塞` 段是唯一口径**」，INDEX 与本 handoff 的拓扑图改为与之一致：
+
+| ticket | 修订前（INDEX / handoff） | 修订后（= ticket 文件） | 理由 |
+|:--|:--|:--|:--|
+| T002 | 等待 T001 | 无阻塞 | T002 只改旧 `build_editable_pptx.py` 与旧测试，不碰新目录 |
+| T004 | 不依赖任何 | 等待 T001 | T004 要写 `skills/json-to-ppt/references/spec-format.md`，目录由 T001 建 |
+
+连带效果：W1a 从「T001 + T004」变成「T001 + T002」；T004 挪到 W1b 与 T003 并行。T001→T002 这条边从拓扑里消失。
+
+#### 状态行补齐（2026-09-18 修订，派发前）
+
+6 张 ticket 首行补上 `<!-- status: todo -->`——`/dispatch` 第 1 步靠这行扫未完成 ticket，此前只能手抄 INDEX 的分派清单。
+
 ---
 
 ## 拓扑与依赖（本批次锁定）
@@ -83,28 +98,28 @@
 flowchart LR
   subgraph W1a["W1a · 可立即开始"]
     T001["[001] scaffold 目录<br/>Pi"]
-    T004["[004] spec-format 扩展<br/>Claude"]
-  end
-  subgraph W1b["W1b · 等待 W1a"]
     T002["[002] warning+continue + existing_presentation<br/>Pi"]
   end
-  subgraph W2["W2 · 等待 W1b"]
+  subgraph W1b["W1b · 等待 [001]（[003] 另需 [002]）"]
+    T004["[004] spec-format 扩展<br/>Claude"]
     T003["[003] build_pptx.py CLI + --template<br/>Pi"]
   end
-  subgraph W3["W3 · 等待 W2"]
+  subgraph W2["W2 · 等待 [003]"]
     T005["[005] fixture + SKILL.md<br/>Claude"]
+  end
+  subgraph W3["W3 · 等待 [005]"]
     T006["[006] skills-lock 注册<br/>Pi"]
   end
-  T001 --> T002
   T001 --> T003
+  T001 --> T004
   T001 --> T005
   T002 --> T003
+  T002 --> T005
   T003 --> T005
-  T004 -.不依赖任何.-> W3
   T005 --> T006
 ```
 
-并发上限 3：W1a 跑 T001 + T004 并行；W2 单跑 T003；W3 三路串行收尾。
+并发上限 3：W1a 跑 T001 + T002 并行（文件不重叠）；W1b 跑 T003 + T004 并行；W2 单跑 T005；W3 单跑 T006。
 
 ---
 

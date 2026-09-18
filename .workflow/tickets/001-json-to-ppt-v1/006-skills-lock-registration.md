@@ -1,3 +1,5 @@
+<!-- status: todo -->
+
 # [006] 注册到顶层 `skills-lock.json`
 
 ## 📌 Spec 引用

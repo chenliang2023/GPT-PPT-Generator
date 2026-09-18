@@ -1,3 +1,5 @@
+<!-- status: todo -->
+
 # [004] 扩展 `spec-format.md`（template 字段 + slide_size 描述）
 
 ## 📌 Spec 引用

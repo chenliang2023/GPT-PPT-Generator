@@ -1,3 +1,5 @@
+<!-- status: todo -->
+
 # [005] 测试 fixture + 端到端测试 + 新 SKILL.md
 
 ## 📌 Spec 引用

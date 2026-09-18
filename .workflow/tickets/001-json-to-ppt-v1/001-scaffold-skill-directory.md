@@ -1,3 +1,5 @@
+<!-- status: todo -->
+
 # [001] scaffold `skills/json-to-ppt/` directory
 
 ## 📌 Spec 引用
