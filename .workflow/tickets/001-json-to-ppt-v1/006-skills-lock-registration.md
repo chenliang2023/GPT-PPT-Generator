@@ -1,4 +1,4 @@
-<!-- status: dispatched to:pi via:codeg-todos at:2026-09-18T10:47:05+08:00 task:#11 前置门禁：等 [005] 合并后才真正开工 -->
+<!-- status: dispatched to:pi via:codeg-todos at:2026-09-18T10:56:12+08:00 task:#15（前身 #11 被取消）前置门禁：等 [005] 合并后才真正开工 -->
 
 # [006] 注册到顶层 `skills-lock.json`
 

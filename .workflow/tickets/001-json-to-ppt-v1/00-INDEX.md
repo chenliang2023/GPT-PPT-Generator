@@ -86,16 +86,20 @@ flowchart LR
 
 全 6 张 ticket 已建为 CodeG To-dos（folder GPT-PPT-Generator），`auto_process` 开启时会自动按 sort_order 领取：
 
-| ticket | CodeG task | Agent | 状态（截至 2026-09-18 10:47） |
+| ticket | CodeG task | Agent | 状态（截至 2026-09-18 10:56） |
 |:--|:--|:--|:--|
 | [001] scaffold | #6 | Pi | ✅ done 已合并 |
 | [002] warning+continue | #7 | Pi | ✅ done 已合并（验收标准 2 的测试已豁免） |
-| [004] spec-format 扩展 | #8 | Claude | 🔄 running |
-| [003] CLI + `--template` | #9 | Pi | 🔄 running |
-| [005] fixture + SKILL.md | #10 | Claude | 🔄 running（前置门禁：会因 [003] 未合并而自停，等 #9 合并后重跑） |
-| [006] skills-lock 注册 | #11 | Pi | ⏳ queued（前置门禁：等 [005]） |
+| [004] spec-format 扩展 | #13 | Claude | ⏳ todo，等你点 Start |
+| [003] CLI + `--template` | #12 | Pi | ⏳ todo，等你点 Start |
+| [005] fixture + SKILL.md | #14 | Claude | ⏳ todo（前置门禁：等 [003] 合并） |
+| [006] skills-lock 注册 | #15 | Pi | ⏳ todo（前置门禁：等 [005] 合并） |
 
-`005` 与 `006` 的任务描述里各有一段**前置门禁**：开工前先检查上游产物是否存在，不满足就直接回「被阻塞，未开始」并结束。这是为了在自动领取（auto_process）下避免抢跑——代价是被拦下的那轮任务会以"零改动"落进 Review，等上游合并后重跑即可。
+**首批卡片曾于 10:47 被整体取消**：#8/#9/#10/#11 在建成后 8–17 秒被 `auto_process` 自动领取并开跑，随后在面板上被逐个取消（`work_task_event.actor = user`）。4 个 worktree 均为干净状态（停在 `da39bfc`，无半成品），故 10:55 直接以新卡重建（#12–#15）。
+
+`auto_process` 现为 **False**（2026-09-18 10:56 读到的 `work_task_settings`），所以新卡停在 `todo`，等手动 Start —— 顺序完全由你控制。
+
+`005` 与 `006` 的任务描述里各有一段**前置门禁**：开工前先检查上游产物是否存在，不满足就直接回「被阻塞，未开始」并结束。若抢在依赖合并前点了 Start，那一轮会以"零改动"落进 Review，等上游合并后重跑即可。
 
 ## 状态行与阻塞边口径
 
