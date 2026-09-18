@@ -482,6 +482,7 @@ def build_pptx(
     base_dir: Path,
     allow_full_bleed_images: bool = False,
     existing_presentation: Presentation | None = None,
+    preserve_slide_size: bool = False,
 ) -> Path:
     slides = spec.get("slides")
     if not isinstance(slides, list) or not slides:
@@ -499,8 +500,9 @@ def build_pptx(
         if existing_presentation is not None
         else Presentation()
     )
-    presentation.slide_width = inches(slide_width)
-    presentation.slide_height = inches(slide_height)
+    if not preserve_slide_size:
+        presentation.slide_width = inches(slide_width)
+        presentation.slide_height = inches(slide_height)
     presentation.core_properties.title = str(spec.get("title") or output_path.stem)
     blank_layout = presentation.slide_layouts[6]
 
