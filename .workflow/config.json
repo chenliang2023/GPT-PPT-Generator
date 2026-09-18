@@ -1,0 +1,38 @@
+{
+    "docs_dir": ".workflow/tickets",
+    "research_dir": ".workflow/research",
+    "specs_dir": ".workflow/specs",
+    "handoffs_dir": ".workflow/handoffs",
+    "server_repo_path": "/home/Len/GPT-PPT-Generator",
+    "local_repo_path": "c:\\Users\\Windows\\Desktop\\Task\\ongoing\\GPT-PPT-Generator",
+    "branch_template": "ticket/<id>-<slug>",
+    "agent_routing": {
+        "claude": [
+            "complex-logic",
+            "architecture",
+            "core-domain",
+            "security"
+        ],
+        "pi": [
+            "crud",
+            "service-layer",
+            "api-endpoint",
+            "scaffold",
+            "config",
+            "migration"
+        ],
+        "antigravity": [
+            "ui",
+            "interaction",
+            "styling"
+        ]
+    },
+    "codeg": {
+        "max_concurrent_tasks": 3,
+        "process_automatically": true,
+        "preflight_command": "python -m pytest",
+        "worktree_location": "",
+        "merge_strategy": "squash",
+        "delete_worktree_after_merge": true
+    }
+}
