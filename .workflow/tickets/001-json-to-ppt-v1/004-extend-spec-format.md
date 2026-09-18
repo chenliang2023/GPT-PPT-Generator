@@ -1,4 +1,4 @@
-<!-- status: dispatched to:claude_code via:codeg-todos at:2026-09-18T10:55:50+08:00 task:#13（前身 #8 被取消）等待手动 Start -->
+<!-- status: in_review task:#13 已实测验证，待 Merge -->
 
 # [004] 扩展 `spec-format.md`（template 字段 + slide_size 描述）
 
@@ -40,6 +40,20 @@ Claude
 - **直接动手，不要先出计划等确认**——本 ticket 已定稿，实现 → 跑验收命令 → 提交，一次做完
 - 分支由 CodeG 管理（`task/<id>`）：不要自建分支、不要 push、不要改 `.workflow/`
 - 验收命令必须真跑，并把**实际输出**贴回结果；跑不起来就直说，不要声称通过
+
+## 🔍 派发后验证（2026-09-18，服务器侧实测，待 Merge）
+
+`task/13`（分支 `task/13`，提交 `c3679ab`）5 条验收全部实测通过：
+
+| # | 实测结果 |
+|:--|:--|
+| 1 | 482 行（要求 ≥ 200） |
+| 2 | 7 种元素类型全覆盖：text / shape / line / image / table / bar_chart / line_chart |
+| 3 | 「新增字段」小节含 `slide.template` 与 `slide.background.image` 的完整 JSON 示例，并写明与 CLI `--template` 的并存关系 |
+| 4 | 「向后兼容」小节 + 文档头部表格都明示"旧 JSON 一个字不改即可渲染" |
+| 5 | 无「破坏性变更」「removed」字样 |
+
+额外核对了「超集」这条硬要求：旧 `spec-format.md`（195 行）**整体作为连续子串**出现在新文档中（`old in new == True`），逐行比对 **0 行丢失**。
 
 ## 🧭 上下文
 - 原文：[`skills/images-to-editable-pptx/references/spec-format.md`](../../skills/images-to-editable-pptx/references/spec-format.md)（约 130 行）

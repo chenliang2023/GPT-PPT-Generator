@@ -1,4 +1,4 @@
-<!-- status: dispatched to:pi via:codeg-todos at:2026-09-18T10:55:50+08:00 task:#12（前身 #9 被取消）等待手动 Start -->
+<!-- status: in_review task:#12 已实测验证，待 Merge -->
 
 # [003] 新建 `build_pptx.py` CLI 入口（薄壳 + `--template`）
 
@@ -67,6 +67,28 @@ Pi
 旧 CLI 是 `--spec <file> --out <file>`，本 ticket 原先的验收命令写成了位置参数，已全部改正。`--template` 作为可选参数追加。
 
 ---
+
+## 🔍 派发后验证（2026-09-18，服务器侧实测，待 Merge）
+
+`task/12`（分支 `task/12`，提交 `b0ef7ec`）7 条验收全部实测通过：
+
+| # | 实测结果 |
+|:--|:--|
+| 1 | CLI 无模板跑通，exit 0 |
+| 2 | 2 张空 slide 的模板 → 输出 3 张 |
+| 3 | 无模板 → 1 张（= spec 中 slide 数），尺寸回落到 spec 默认 13.333×7.5 |
+| 4 | 模板不存在 → exit 1，stderr 含 `template` |
+| 5 | 输出可被 python-pptx 读回 |
+| 6 | **D1**：10×7.5in 模板 → 输出 `9144000×6858000` 与模板**逐值相等**；spec 声明 13.333×7.5 时 stderr 出 `Warning: template slide size takes precedence over spec slide_size`，输出仍是 10×7.5 |
+| 7 | **D2**：正常模板 exit 0；合法模板仅 5 个版式且无一叫 `blank` → exit 1 + `Template does not contain a blank layout and has fewer than 7 layouts`，**无栈回溯** |
+
+实现路线：D1 走推荐路线（`build_pptx()` 新增 `preserve_slide_size: bool = False`，CLI 传 `True`）；D2 用 `LayoutsProxy` 把 `slide_layouts[6]` 掉包成按名称挑出的空白版式。
+
+三点观察（不阻塞 merge）：
+
+- ⚠️ **`preflight` 未记录**：CodeG 这条任务的 `preflight` 字段为空，这轮 pytest 门禁没跑。人工回归 `tests/test_editable_pptx_skill.py` = 2 passed
+- 🧩 **代理对象是取巧实现**：`TemplatePresentationProxy` 打破了 `existing_presentation: Presentation | None` 的类型标注；一旦旧函数改用别的 layout 索引或加 `isinstance` 判断就会静默失效。后续可考虑给 `build_pptx()` 加 `blank_layout: SlideLayout | None = None` 取代掉这个代理
+- 🐛 **非 D2 场景的健壮性**：模板包本身损坏（例如悬挂 rId）时抛未捕获的 `KeyError` 栈回溯；D2 要求的"版式不足"路径本身是干净的
 
 ## 🧭 上下文
 - 复用的库函数：`skills/images-to-editable-pptx/scripts/build_editable_pptx.py:478` 的 `build_pptx(spec, output_path, base_dir, allow_full_bleed_images=False)`
