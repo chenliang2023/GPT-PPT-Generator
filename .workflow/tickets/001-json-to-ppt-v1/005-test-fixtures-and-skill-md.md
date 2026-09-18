@@ -39,6 +39,11 @@ Claude
 ## 🌿 分支
 `ticket/005-test-fixtures-and-skill-md`
 
+## 🏃 执行约定
+- **直接动手，不要先出计划等确认**——本 ticket 已定稿，实现 → 跑验收命令 → 提交，一次做完
+- 分支由 CodeG 管理（`task/<id>`）：不要自建分支、不要 push、不要改 `.workflow/`
+- 验收命令必须真跑，并把**实际输出**贴回结果；跑不起来就直说，不要声称通过
+
 ## 🧭 上下文
 - 现有测试文件：[`tests/test_editable_pptx_skill.py`](../../tests/test_editable_pptx_skill.py) 用 `importlib.util.spec_from_file_location` 动态加载脚本——新测试**用相同模式**加载 `skills/json-to-ppt/scripts/build_pptx.py`
 - 旧 SKILL.md：[`skills/images-to-editable-pptx/SKILL.md`](../../skills/images-to-editable-pptx/SKILL.md) 是范本——frontmatter `name` + `description`、Hard Requirements、Workflow、Reconstruction Rules、Portable Renderer、Delivery Gate

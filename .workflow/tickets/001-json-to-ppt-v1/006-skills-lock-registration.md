@@ -32,6 +32,11 @@ Pi
 ## 🌿 分支
 `ticket/006-skills-lock-registration`
 
+## 🏃 执行约定
+- **直接动手，不要先出计划等确认**——本 ticket 已定稿，实现 → 跑验收命令 → 提交，一次做完
+- 分支由 CodeG 管理（`task/<id>`）：不要自建分支、不要 push、不要改 `.workflow/`
+- 验收命令必须真跑，并把**实际输出**贴回结果；跑不起来就直说，不要声称通过
+
 ## 🧭 上下文
 - `skills-lock.json` 的 schema：先 `cat skills-lock.json` 看现有格式再追加
 - entry_point 通常指向 `scripts/build_pptx.py`（CLI 入口）

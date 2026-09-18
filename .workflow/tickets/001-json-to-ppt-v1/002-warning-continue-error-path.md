@@ -1,4 +1,4 @@
-<!-- status: todo -->
+<!-- status: dispatched to:pi via:codeg-todos at:2026-09-18T09:51:49+08:00 task:#7 rework_needed -->
 
 # [002] 失败即 warning，不阻断渲染
 
@@ -38,6 +38,12 @@ Pi
 
 ## 🌿 分支
 `ticket/002-warning-continue-error-path`
+
+## 🏃 执行约定
+- **直接动手，不要先出计划等确认**——本 ticket 已定稿，实现 → 跑验收命令 → 提交，一次做完
+- 分支由 CodeG 管理（`task/<id>`）：不要自建分支、不要 push、不要改 `.workflow/`
+- 验收命令必须真跑，并把**实际输出**贴回结果；跑不起来就直说，不要声称通过
+- 环境已修好：`python` 与 `python -m pytest` 在本机可用（2026-09-18 装好依赖），不要再以"命令不存在"为由跳过验收
 
 ## 🧭 上下文
 - 改的函数：`build_pptx()` 在 `skills/images-to-editable-pptx/scripts/build_editable_pptx.py:478`
